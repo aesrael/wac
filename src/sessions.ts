@@ -5,6 +5,7 @@ export class SessionRouter {
   constructor(
     private readonly client: OpencodeClientFacade,
     private readonly store: Store,
+    private readonly defaultModel?: string,
   ) {}
 
   async resolve(chatJid: string): Promise<ChatSession> {
@@ -17,18 +18,20 @@ export class SessionRouter {
         /* mapped session is gone server-side (e.g. opencode serve restarted and
            lost its sessions); fall through and recreate a fresh one */
       }
-      return await this.createForChat(chatJid, existing.title)
+      return await this.createForChat(chatJid, existing.title, existing.model ?? this.defaultModel)
     }
 
-    const session = await this.createForChat(chatJid)
+    const session = await this.createForChat(chatJid, "Chat", this.defaultModel)
     return session
   }
 
-  async createForChat(chatJid: string, title = "Chat"): Promise<ChatSession> {
+  async createForChat(chatJid: string, title = "Chat", model?: string): Promise<ChatSession> {
     const session = await this.client.createSession(title)
+    const effectiveModel = model ?? this.store.get(chatJid)?.model ?? this.defaultModel
     const record: ChatSession = {
       sessionId: session.id,
       title,
+      ...(effectiveModel ? { model: effectiveModel } : {}),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     }
@@ -47,9 +50,12 @@ export class SessionRouter {
     }
     const session = await this.client.getSession(sessionId)
     if (!session) return undefined
+    const previous = this.store.get(chatJid)
+    const effectiveModel = previous?.model ?? this.defaultModel
     const record: ChatSession = {
       sessionId,
       title: session.title || sessionId,
+      ...(effectiveModel ? { model: effectiveModel } : {}),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     }
@@ -61,6 +67,15 @@ export class SessionRouter {
     const existing = this.store.get(chatJid)
     if (!existing) return undefined
     existing.model = model
+    existing.updatedAt = Date.now()
+    this.store.set(chatJid, existing)
+    return existing
+  }
+
+  ensureModel(chatJid: string, fallback?: string): ChatSession | undefined {
+    const existing = this.store.get(chatJid)
+    if (!existing || existing.model || !fallback) return existing
+    existing.model = fallback
     existing.updatedAt = Date.now()
     this.store.set(chatJid, existing)
     return existing

@@ -88,10 +88,11 @@ export async function handleCommand(
 
     case "/model": {
       const current = router.chatSession(chatJid)
+      const effective = current?.model ?? config.defaultModel
       if (!args) {
-        if (!current) return { handled: true, text: "Model: (default — none set for this chat)" }
-        if (!current.model) return { handled: true, text: "Model: (default — none set for this chat)" }
-        return { handled: true, text: `Model: ${current.model}` }
+        if (!effective) return { handled: true, text: "Model: (default — none set for this chat)" }
+        const suffix = current?.model ? "" : " (default)"
+        return { handled: true, text: `Model: ${effective}${suffix}` }
       }
       const record = await router.setModel(chatJid, args.replace(/\s+/g, ""))
       if (!record) return { handled: true, text: "No session for this chat yet; send a message first." }
@@ -112,14 +113,16 @@ export async function handleCommand(
     case "/compact": {
       const record = router.chatSession(chatJid)
       if (!record) return { handled: true, text: "No session for this chat yet; send a message first." }
-      await client.summarize(record.sessionId, record.model)
+      const effective = record.model ?? config.defaultModel
+      await client.summarize(record.sessionId, effective)
       return { handled: true, text: "Compacting session…" }
     }
 
     case "/current": {
       const record = router.chatSession(chatJid)
       if (!record) return { handled: true, text: "No session for this chat yet." }
-      const model = record.model ? ` (model: ${record.model})` : ""
+      const effective = record.model ?? config.defaultModel
+      const model = effective ? ` (model: ${effective}${record.model ? "" : " — default"})` : ""
       return { handled: true, text: `Session: ${record.sessionId}${model}` }
     }
 

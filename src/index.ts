@@ -42,17 +42,31 @@ function ensureConfig(): WacConfig {
   }
 }
 
-async function sendChunked(whatsapp: WhatsAppClient, chatJid: string, text: string) {
+async function sendChunked(
+  whatsapp: WhatsAppClient,
+  chatJid: string,
+  text: string,
+  label?: string,
+) {
   const cleaned = softFormat(text)
   const parts = withSuffix(chunk(cleaned))
   for (let i = 0; i < parts.length; i++) {
-    const body = i === 0 ? `◆ wac\n\n${parts[i]}` : parts[i]
+    const body = i === 0 && label ? `${label}\n\n${parts[i]}` : i === 0 ? `◆ wac\n\n${parts[i]}` : parts[i]
     try {
       await whatsapp.sendText(chatJid, body)
     } catch (error) {
       console.error(`failed to send chunk ${i + 1}/${parts.length}: ${format(error)}`)
     }
   }
+}
+
+function wacLabel(sessionId?: string, model?: string): string {
+  const short = sessionId ? sessionId.slice(0, 8) : ""
+  const parts: string[] = []
+  if (short) parts.push(`_${short}_`)
+  if (model) parts.push(`_${model}_`)
+  if (parts.length === 0) return "◆ wac"
+  return `◆ wac  ·  ${parts.join(" · ")}`
 }
 
 const chatQueues = new Map<string, Promise<void>>()
@@ -88,6 +102,10 @@ async function handleIncoming(
   await enqueue(chatJid, () => processMessage(whatsapp, opencode, router, config, event))
 }
 
+function effectiveModelFor(router: SessionRouter, config: WacConfig, chatJid: string): string | undefined {
+  return router.chatSession(chatJid)?.model ?? config.defaultModel
+}
+
 async function processMessage(
   whatsapp: WhatsAppClient,
   opencode: OpencodeClientFacade,
@@ -101,7 +119,8 @@ async function processMessage(
     if (isLocalCommand(text)) {
       const result = await handleCommand(router, opencode, config, chatJid, text)
       if (result.handled) {
-        await sendChunked(whatsapp, chatJid, result.text)
+        const s = router.chatSession(chatJid)
+        await sendChunked(whatsapp, chatJid, result.text, wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
       }
       return
     }
@@ -110,19 +129,20 @@ async function processMessage(
     if (text.trim().startsWith("/")) {
       try {
         const reply = await handlePassthrough(opencode, record.sessionId, text)
-        if (reply) await sendChunked(whatsapp, chatJid, reply)
+        if (reply) await sendChunked(whatsapp, chatJid, reply, wacLabel(record.sessionId, record.model ?? config.defaultModel))
         return
       } catch (error) {
-        await sendChunked(whatsapp, chatJid, `(error) ${(error as Error).message}`)
+        await sendChunked(whatsapp, chatJid, `(error) ${(error as Error).message}`, wacLabel(record.sessionId, record.model ?? config.defaultModel))
         return
       }
     }
 
-    const result = await promptWithRetry(opencode, record, text, config)
-    await sendChunked(whatsapp, chatJid, result.text || "(no text reply)")
+    const result = await promptWithRetry(opencode, router, chatJid, record, text, config)
+    await sendChunked(whatsapp, chatJid, result.text || "(no text reply)", wacLabel(record.sessionId, record.model ?? config.defaultModel))
   } catch (error) {
     console.error(`handler error: ${format(error)}`)
-    await sendChunked(whatsapp, chatJid, `(error) ${(error as Error).message}`)
+    const s = router.chatSession(chatJid)
+    await sendChunked(whatsapp, chatJid, `(error) ${(error as Error).message}`, wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
   } finally {
     await whatsapp.stopTyping(chatJid)
   }
@@ -130,11 +150,17 @@ async function processMessage(
 
 async function promptWithRetry(
   opencode: OpencodeClientFacade,
+  router: SessionRouter,
+  chatJid: string,
   record: Awaited<ReturnType<SessionRouter["resolve"]>>,
   text: string,
   config: WacConfig,
 ) {
   const effectiveModel = record.model ?? config.defaultModel
+  if (!record.model && effectiveModel) {
+    router.ensureModel(chatJid, effectiveModel)
+    record.model = effectiveModel
+  }
   const attempts = 3
   let lastError: unknown
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -204,7 +230,7 @@ async function cmdServe() {
     password: config.opencodePassword,
     directory: config.opencodeDirectory,
   })
-  const router = new SessionRouter(opencode, store)
+  const router = new SessionRouter(opencode, store, config.defaultModel)
   const whatsapp = new WhatsAppClient(config, authPath(config.dataDir))
   let welcomeSent = false
 
