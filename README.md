@@ -11,18 +11,29 @@ password-protected loopback `opencode serve`. No cloud, no database — just
 ## How it works
 
 ```
-WhatsApp ──Baileys──► wac (Node daemon) ──HTTP──► opencode serve
-                          │
-              ~/.config/wac/{config,store,auth/}
+┌──────────┐  Baileys/QR   ┌──────────────────┐  HTTP BasicAuth  ┌─────────────────┐
+│ WhatsApp │ ───────────► │ wac (Node)       │ ───────────────► │ opencode serve  │
+│  phone   │               │  chat→session    │                  │  @opencode-ai/sdk│
+└──────────┘               │  chunk 4k (n/m)  │                  └────────┬────────┘
+                           │  /help /model/*  │                           │ sessions
+                           └────────┬─────────┘                           │
+                                    │ store.json                          │
+                           ┌────────▼────────┐                             │
+                           │ ~/.config/wac/  │ ◄───────────────────────────┘
+                           │  config.json    │
+                           │  store.json     │
+                           │  auth/ (Baileys)│
+                           └─────────────────┘
 ```
 
 - **One WhatsApp chat ↔ one opencode session.** The mapping persists in
   `store.json`, so conversations survive daemon restarts, reconnects, and
-  your phone being offline.
-- **Replies are tidied and chunked.** Markdown is lightly normalized (fences
-  stripped, headers/bold un-bolded) and long replies are split at 4000 chars
-  (`(n/m)` suffix when broken up). Every reply is prefixed with `> ` so it
-  reads as a distinct message, not your own typing.
+  your phone being offline. If opencode loses a session (restart), wac
+  recreates it transparently.
+- **Replies preserve WhatsApp formatting.** `*bold*`, `` `code` ``, ```blocks```,
+  `> quotes`, `•` lists stay; `#` headings become `*bold*`, `[text](url)` becomes
+  `text https://url`. Long replies are split at 4000 chars (`(n/m)` suffix),
+  never mid-fence.
 - **Welcome DM.** When wac connects, it sends an "online" message to each
   allowlisted number so you know it's live.
 - **Slash commands** are resolved against the opencode HTTP API — no CLI
@@ -31,7 +42,7 @@ WhatsApp ──Baileys──► wac (Node daemon) ──HTTP──► opencode s
 ## Prerequisites
 
 - Node 22+
-- [opencode](https://opencode.ai) installed
+- [opencode](https://opencode.ai) installed (`~/.opencode/bin/opencode`)
 - A WhatsApp account (the phone number the bot will be a linked device to)
 
 ## Setup
@@ -42,16 +53,7 @@ WhatsApp ──Baileys──► wac (Node daemon) ──HTTP──► opencode s
    npm install && npm run build
    ```
 
-2. **Start `opencode serve`** on loopback with a password.
-
-   ```sh
-   OPENCODE_SERVER_PASSWORD=<your-own-password> opencode serve --hostname 127.0.0.1 --port 8080
-   ```
-
-   Keep this terminal/process running. Loopback-only bind + Basic-auth password
-   keeps the API (which can run bash) safe from other processes on your machine.
-
-3. **Configure wac.** First run creates `~/.config/wac/config.json` from
+2. **Configure wac.** First run creates `~/.config/wac/config.json` from
    `config.example.json`. Edit it:
 
    ```json
@@ -59,15 +61,21 @@ WhatsApp ──Baileys──► wac (Node daemon) ──HTTP──► opencode s
      "allowlist": ["12025550123"],
      "opencodeBaseUrl": "http://127.0.0.1:8080",
      "opencodeUsername": "opencode",
-     "name": "wac"
+     "name": "wac",
+     "opencodeDirectory": "/Users/you/Desktop",
+     "defaultModel": "opencode/big-pickle"
    }
    ```
 
    - `allowlist` — your WhatsApp number(s), E.164 (`4479...`), fail-closed.
-   - `opencodePassword` — optional; if omitted, set the `OPENCODE_SERVER_PASSWORD`
-     environment variable on the wac process instead (same value as step 2).
+   - `opencodePassword` — optional; if omitted, set `OPENCODE_SERVER_PASSWORD`
+     env on the wac process instead. wac also reads it from `config.json` and
+     passes it to `opencode serve` if it needs to spawn it.
+   - `opencodeDirectory` — project root opencode runs in.
+   - `defaultModel` — optional `provider/model` used when a chat has no per-chat
+     `/model` set.
 
-4. **Run & link**
+3. **Run & link**
 
    ```sh
    node wac serve
@@ -75,9 +83,11 @@ WhatsApp ──Baileys──► wac (Node daemon) ──HTTP──► opencode s
 
    A QR code prints to the terminal — scan it with WhatsApp → Settings →
    Linked devices. Credentials are saved in `~/.config/wac/auth/` and the link
-   resumes automatically on future restarts.
+   resumes automatically on future restarts. If `opencode serve` is not
+   reachable at `opencodeBaseUrl`, wac spawns it for you on the configured
+   port (loopback-only).
 
-5. **(Optional) Always-on.** Install the launchd plist so wac starts at login
+4. **(Optional) Always-on.** Install the launchd plist so wac starts at login
    and restarts on crash:
 
    ```sh
@@ -85,7 +95,8 @@ WhatsApp ──Baileys──► wac (Node daemon) ──HTTP──► opencode s
    ```
 
    This reads your password and port from `~/.config/wac/config.json` and
-   generates the plist automatically. Re-run after config changes to update it.
+   generates `~/Library/LaunchAgents/com.user.wac.plist` automatically.
+   Re-run after config changes to update it.
 
 ## Commands (DM the bot)
 
@@ -98,6 +109,7 @@ WhatsApp ──Baileys──► wac (Node daemon) ──HTTP──► opencode s
 | `/delete` | delete the current session for this chat (server + mapping) |
 | `/model` | show this chat's model (or `(default)` if none set) |
 | `/model <provider/model>` | set the model for this chat's prompts |
+| `/models [n]` | list available models (default 20, max 100) |
 | `/compact` | summarize/compact the current session |
 | `/status` | connection + auth status |
 | `/help` | this list |
@@ -108,10 +120,12 @@ WhatsApp ──Baileys──► wac (Node daemon) ──HTTP──► opencode s
 
 ```sh
 node wac status
+node wac qr      # show pairing QR and exit once linked
+node wac serve   # start daemon
 ```
 
-Prints WhatsApp link state, opencode reachability, and the session→chat
-mapping. Exits nonzero if `opencode serve` is unreachable.
+`wac status` prints WhatsApp link state, opencode reachability, and the
+session→chat mapping. Exits nonzero if `opencode serve` is unreachable.
 
 ## Failure modes
 
@@ -119,21 +133,14 @@ mapping. Exits nonzero if `opencode serve` is unreachable.
 | --- | --- | --- |
 | QR shown on every start | `auth/creds.json` missing or link revoked | Re-scan once; creds then persist |
 | `WhatsApp: close` in log | Baileys socket dropped | Auto-reconnect (fast for WA's restart-required handshake, ~5s for drops); logout/forbidden exits (launchd restarts) |
-| `(error) ...` on prompt | `opencode serve` down | Session mapping survives; wac retries on the next message (no queuing); `wac status` exits nonzero |
+| `(error) ...` on prompt | `opencode serve` down | Session mapping survives; wac auto-spawns serve if needed and retries on next message; `wac status` exits nonzero |
+| `Session not found` | opencode restarted and lost sessions | wac detects missing server session and creates a fresh one for the chat |
 | `/foo` "opencode rejected command" | not a real command | Reported to you, not sent to the model |
-| `/compact` error about model | no per-chat model set | `/model <provider/model>` first |
-| long replies | normal | chunked with `(n/m)` suffixes |
+| `/compact` error about model | no per-chat model set | `/model <provider/model>` first (or set `defaultModel` in config) |
+| long replies | normal | chunked with `(n/m)` suffixes, never split inside ```fence``` |
 
 Known limits: text-only (no media/files), no groups, replies arrive when the
 agent finishes (no word-by-word streaming).
-
-## Commands
-
-```
-wac serve   start the daemon
-wac qr      show the pairing QR and exit once linked
-wac status  connection + session summary
-```
 
 Not v1: groups, multi-account, media, ACP, other platforms (Telegram/Discord/web).
 

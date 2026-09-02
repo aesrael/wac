@@ -3,5 +3,6 @@
   "opencodeBaseUrl": "http://127.0.0.1:8080",
   "opencodeUsername": "opencode",
   "name": "wac",
-  "opencodeDirectory": "/Users/you/Desktop"
+  "opencodeDirectory": "/Users/you/Desktop",
+  "defaultModel": "opencode/big-pickle"
 }
