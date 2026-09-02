@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.wac</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <!-- EDIT: absolute path to the repo's scripts/wac.serve.sh -->
+        <string>/path/to/wac/scripts/wac.serve.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>OPENCODE_SERVER_PASSWORD</key>
+        <string>REPLACE_WITH_STRONG_PASSWORD</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/adeyemi/.config/wac/wac.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/adeyemi/.config/wac/wac.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,294 @@
+#!/usr/bin/env node
+import { format } from "node:util"
+import { authPath, configPath, defaultConfig, ensureDataDir, loadConfig, writeConfig } from "./config.js"
+import type { WacConfig } from "./config.js"
+import { WhatsAppClient, hasCredentials, type MessageEvent } from "./baileys.js"
+import { OpencodeClientFacade, reachable } from "./serve-client.js"
+import { SessionRouter } from "./sessions.js"
+import { Store } from "./store.js"
+import { chunk, softFormat, withSuffix } from "./chunker.js"
+import { handleCommand, isLocalCommand, handlePassthrough } from "./commands.js"
+
+const BIN = "wac"
+
+function usage() {
+  console.log(`${BIN} <command>`)
+  console.log()
+  console.log("  serve        start the daemon (listen on WhatsApp)")
+  console.log("  qr           display pairing QR and exit once linked")
+  console.log("  status       connection + session summary")
+  console.log("  help         this help")
+  process.exit(0)
+}
+
+function fatal(message: string): never {
+  console.error(`error: ${message}`)
+  process.exit(1)
+}
+
+function ensureConfig(): WacConfig {
+  try {
+    const config = loadConfig()
+    ensureDataDir(config)
+    return config
+  } catch (error) {
+    if (!(error instanceof Error)) throw error
+    const dataDir = defaultConfig().dataDir
+    ensureDataDir(defaultConfig())
+    writeConfig(defaultConfig())
+    console.error(`No config found. Created a default config at ${configPath(dataDir)}.`)
+    console.error(`Edit it to set "allowlist" (your WhatsApp number) and the opencode password.`)
+    process.exit(1)
+  }
+}
+
+const REPLY_PREFIX = "> "
+
+async function sendChunked(whatsapp: WhatsAppClient, chatJid: string, text: string) {
+  const cleaned = softFormat(text)
+  const parts = withSuffix(chunk(cleaned))
+  for (let i = 0; i < parts.length; i++) {
+    const body = i === 0 ? `${REPLY_PREFIX}${parts[i]}` : parts[i]
+    try {
+      await whatsapp.sendText(chatJid, body)
+    } catch (error) {
+      console.error(`failed to send chunk ${i + 1}/${parts.length}: ${format(error)}`)
+    }
+  }
+}
+
+const chatQueues = new Map<string, Promise<void>>()
+
+function enqueue<T>(chatJid: string, fn: () => Promise<T>): Promise<T> {
+  const prev = chatQueues.get(chatJid) ?? Promise.resolve()
+  const next = prev.then(fn, fn)
+  chatQueues.set(chatJid, next.catch(() => undefined).then(() => undefined))
+  return next
+}
+
+async function handleIncoming(
+  whatsapp: WhatsAppClient,
+  opencode: OpencodeClientFacade,
+  router: SessionRouter,
+  config: WacConfig,
+  event: MessageEvent,
+) {
+  const { chatJid, senderJid, text, isGroup, fromMe } = event
+
+  if (fromMe && !(await whatsapp.isAllowed(chatJid))) {
+    console.log(`ignoring own message in non-allowlisted chat ${chatJid}`)
+    return
+  }
+  if (isGroup) {
+    console.log(`ignoring group message in ${chatJid} (groups not supported in v1)`)
+    return
+  }
+  const effectiveSender = fromMe ? chatJid : senderJid
+  if (!(await whatsapp.isAllowed(effectiveSender))) {
+    console.log(`ignoring message from non-allowlisted sender ${effectiveSender}`)
+    return
+  }
+
+  await enqueue(chatJid, () => processMessage(whatsapp, opencode, router, config, event))
+}
+
+async function processMessage(
+  whatsapp: WhatsAppClient,
+  opencode: OpencodeClientFacade,
+  router: SessionRouter,
+  config: WacConfig,
+  event: MessageEvent,
+) {
+  const { chatJid, text } = event
+  await whatsapp.startTyping(chatJid)
+  try {
+    if (isLocalCommand(text)) {
+      const result = await handleCommand(router, opencode, config, chatJid, text)
+      if (result.handled) {
+        await sendChunked(whatsapp, chatJid, result.text)
+      }
+      return
+    }
+
+    const record = await router.resolve(chatJid)
+    if (text.trim().startsWith("/")) {
+      try {
+        const reply = await handlePassthrough(opencode, record.sessionId, text)
+        if (reply) await sendChunked(whatsapp, chatJid, reply)
+        return
+      } catch (error) {
+        await sendChunked(whatsapp, chatJid, `(error) ${(error as Error).message}`)
+        return
+      }
+    }
+
+    const result = await promptWithRetry(opencode, record, text, config)
+    await sendChunked(whatsapp, chatJid, result.text || "(no text reply)")
+  } catch (error) {
+    console.error(`handler error: ${format(error)}`)
+    await sendChunked(whatsapp, chatJid, `(error) ${(error as Error).message}`)
+  } finally {
+    await whatsapp.stopTyping(chatJid)
+  }
+}
+
+async function promptWithRetry(
+  opencode: OpencodeClientFacade,
+  record: Awaited<ReturnType<SessionRouter["resolve"]>>,
+  text: string,
+  config: WacConfig,
+) {
+  const attempts = 3
+  let lastError: unknown
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await opencode.prompt(record.sessionId, text, record.model, config.systemPrompt)
+    } catch (error) {
+      lastError = error
+      if (attempt < attempts) {
+        const delay = 1500 * attempt
+        console.log(`prompt failed (attempt ${attempt}), retrying in ${delay}ms: ${format(error)}`)
+        await new Promise((resolve) => setTimeout(resolve, delay))
+      }
+    }
+  }
+  throw lastError
+}
+
+function toJid(number: string): string {
+  return number.includes("@") ? number : `${number.replace(/^\+/, "")}@s.whatsapp.net`
+}
+
+async function sendWelcome(whatsapp: WhatsAppClient, config: WacConfig) {
+  const message = [
+    `wac is online. Send /help for commands, or just message me.`,
+  ].join("\n")
+  for (const number of config.allowlist) {
+    try {
+      await whatsapp.sendText(toJid(number), message)
+      console.log(`sent welcome to ${number}`)
+    } catch (error) {
+      console.error(`failed to send welcome to ${number}: ${format(error)}`)
+    }
+  }
+}
+
+async function cmdServe() {
+  const config = ensureConfig()
+  if (config.allowlist.length === 0) {
+    fatal(`config "allowlist" is empty — add your WhatsApp number to ${configPath(config.dataDir)}`)
+  }
+
+  const store = new Store(config.dataDir)
+  const opencode = new OpencodeClientFacade({
+    baseUrl: config.opencodeBaseUrl,
+    username: config.opencodeUsername,
+    password: config.opencodePassword,
+  })
+  const router = new SessionRouter(opencode, store)
+  const whatsapp = new WhatsAppClient(config, authPath(config.dataDir))
+  let welcomeSent = false
+
+  whatsapp.statusListener = (status, qr) => {
+    const line =
+      status === "open"
+        ? "WhatsApp: connected"
+        : status === "qr"
+          ? "WhatsApp: needs QR — scan with your phone"
+          : `WhatsApp: ${status}`
+    console.log(line)
+    if (status === "open" && !welcomeSent) {
+      welcomeSent = true
+      void sendWelcome(whatsapp, config)
+    }
+    void qr
+  }
+
+  whatsapp.messageListener = (event) => handleIncoming(whatsapp, opencode, router, config, event)
+
+  const creds = await hasCredentials(authPath(config.dataDir))
+  if (!creds) {
+    console.log("No WhatsApp credentials yet — a QR will be shown. Scan it to link this device.")
+  }
+
+  const shutdown = async () => {
+    console.log("shutting down…")
+    await whatsapp.shutdown()
+    store.flush()
+    process.exit(0)
+  }
+  process.on("SIGINT", () => void shutdown())
+  process.on("SIGTERM", () => void shutdown())
+
+  const opencodeUp = await opencode.check()
+  if (!opencodeUp) console.log(`warning: opencode serve not reachable at ${config.opencodeBaseUrl} — will retry`)
+  else console.log(`opencode serve: reachable at ${config.opencodeBaseUrl}`)
+
+  await whatsapp.start()
+}
+
+async function cmdQr() {
+  const config = ensureConfig()
+  console.log("Scan the QR below with WhatsApp > Linked devices.")
+  const whatsapp = new WhatsAppClient(config, authPath(config.dataDir))
+  const done = new Promise<void>((resolve) => {
+    whatsapp.statusListener = (status) => {
+      if (status === "open") resolve()
+    }
+  })
+  await whatsapp.start()
+  await done
+  console.log("Linked. You can now run wac serve.")
+  await whatsapp.shutdown()
+  process.exit(0)
+}
+
+async function cmdStatus() {
+  const config = ensureConfig()
+  const creds = await hasCredentials(authPath(config.dataDir))
+
+  let opencodeOk = false
+  let opencodeLine = "opencode serve: unreachable"
+  try {
+    opencodeOk = await reachable({
+      baseUrl: config.opencodeBaseUrl,
+      username: config.opencodeUsername,
+      password: config.opencodePassword,
+    })
+    opencodeLine = opencodeOk ? "opencode serve: reachable" : "opencode serve: down (retrying)"
+  } catch {
+    opencodeLine = "opencode serve: unreachable"
+  }
+
+  console.log(`WhatsApp: ${creds ? "credentials present" : "needs QR link"}`)
+  console.log(opencodeLine)
+  const store = new Store(config.dataDir)
+  const mapping = store.all()
+  console.log(`sessions: ${Object.keys(mapping).length} mapped`)
+  for (const [chat, record] of Object.entries(mapping)) {
+    console.log(`  ${chat}  ->  ${record.sessionId}${record.model ? `  (${record.model})` : ""}`)
+  }
+  if (!opencodeOk) process.exitCode = 1
+}
+
+async function main() {
+  const [command] = process.argv.slice(2)
+  switch (command) {
+    case "serve":
+      return cmdServe()
+    case "qr":
+      return cmdQr()
+    case "status":
+      return cmdStatus()
+    case "help":
+    case undefined:
+      usage()
+    default:
+      fatal(`unknown command: ${command}`)
+  }
+}
+
+main().catch((error) => {
+  console.error(format(error))
+  process.exit(1)
+})

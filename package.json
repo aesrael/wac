@@ -1,0 +1,30 @@
+{
+  "name": "wac",
+  "version": "0.1.0",
+  "description": "WhatsApp → opencode bridge",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "wac": "./wac"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx wac serve",
+    "serve": "node wac serve",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.18.26",
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@types/qrcode-terminal": "^0.12.2",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}
