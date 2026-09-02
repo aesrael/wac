@@ -11,9 +11,9 @@ password-protected loopback `opencode serve`. No cloud, no database — just
 ## How it works
 
 ```
-phone ── WhatsApp/Baileys ──► wac (Node daemon) ──HTTP──► opencode serve (your machine)
-                                   │
-                        ~/.config/wac/{config,store}.json + auth/
+WhatsApp ──Baileys──► wac (Node daemon) ──HTTP──► opencode serve
+                          │
+              ~/.config/wac/{config,store,auth/}
 ```
 
 - **One WhatsApp chat ↔ one opencode session.** The mapping persists in
@@ -81,10 +81,11 @@ phone ── WhatsApp/Baileys ──► wac (Node daemon) ──HTTP──► op
    and restarts on crash:
 
    ```sh
-   cp wac.serve.plist ~/Library/LaunchAgents/com.user.wac.plist
-   # edit paths + OPENCODE_SERVER_PASSWORD in the plist and scripts/wac.serve.sh
-   launchctl load ~/Library/LaunchAgents/com.user.wac.plist
+   npm run launchd
    ```
+
+   This reads your password and port from `~/.config/wac/config.json` and
+   generates the plist automatically. Re-run after config changes to update it.
 
 ## Commands (DM the bot)
 
@@ -132,25 +133,6 @@ agent finishes (no word-by-word streaming).
 wac serve   start the daemon
 wac qr      show the pairing QR and exit once linked
 wac status  connection + session summary
-```
-
-## Layout
-
-```
-wac                 bin entry (loads dist/index.js)
-src/                TypeScript
-  index.ts          CLI (serve/qr/status) + message handler
-  baileys.ts        WhatsApp socket, QR, reconnect
-  serve-client.ts   opencode SDK facade (Basic auth)
-  sessions.ts       chat→session routing
-  commands.ts       slash-command handling
-  chunker.ts        markdown-safe 4000-char splitting
-  store.ts          store.json persistence
-  config.ts         ~/.config/wac/config.json
-opencode.json       permission defaults (single-user, all allowed)
-config.example.json template for ~/.config/wac/config.json
-wac.example.json    example store.json shape
-wac.serve.plist     launchd template
 ```
 
 Not v1: groups, multi-account, media, ACP, other platforms (Telegram/Discord/web).

@@ -5,6 +5,7 @@ export type OpenCodeAuth = {
   baseUrl: string
   username: string
   password?: string
+  directory: string
 }
 
 function data<T>(result: { data: T | undefined; error?: unknown }): T {
@@ -23,6 +24,7 @@ export function makeClient(auth: OpenCodeAuth): OpencodeClient {
   return createOpencodeClient({
     baseUrl: auth.baseUrl as `${string}://${string}`,
     headers: authHeader(auth),
+    directory: auth.directory,
     throwOnError: true,
   })
 }
@@ -77,7 +79,8 @@ export class OpencodeClientFacade {
   }
 
   async prompt(sessionId: string, text: string, model?: string, system?: string): Promise<PromptResult> {
-    const [providerID, modelID] = model?.split("/", 2) ?? []
+    const providerID = model?.includes("/") ? model.slice(0, model.indexOf("/")) : undefined
+    const modelID = model?.includes("/") ? model.slice(model.indexOf("/") + 1) : undefined
     const result = data(
       await this.client.session.prompt({
         path: { id: sessionId },
@@ -113,7 +116,8 @@ export class OpencodeClientFacade {
   }
 
   async summarize(sessionId: string, model?: string): Promise<boolean> {
-    const [providerID, modelID] = model?.split("/", 2) ?? []
+    const providerID = model?.includes("/") ? model.slice(0, model.indexOf("/")) : undefined
+    const modelID = model?.includes("/") ? model.slice(model.indexOf("/") + 1) : undefined
     if (!providerID || !modelID) {
       const info = data(await this.client.session.get({ path: { id: sessionId } }))
       throw new Error(`no per-chat model set for session ${info.id}; use /model <provider/model> first`)
@@ -123,6 +127,35 @@ export class OpencodeClientFacade {
       body: { providerID, modelID },
     })
     return true
+  }
+
+  async listProviders(): Promise<Array<{ id: string; models: Record<string, unknown> }>> {
+    const data = await this.client.config.providers() as unknown as { data?: unknown; error?: unknown }
+    const raw = (data as { data?: unknown })?.data as unknown
+    if (raw && typeof raw === "object") {
+      const obj = raw as Record<string, unknown>
+      if (Array.isArray((obj as { providers?: unknown }).providers)) {
+        const arr = (obj as { providers: Array<{ id: string; models?: Record<string, unknown> }> }).providers
+        return arr.map((p) => ({ id: p.id, models: p.models ?? {} }))
+      }
+      if (!Array.isArray(raw)) {
+        // legacy: { providerId: { models: {...} } }
+        return Object.entries(raw as Record<string, { models?: Record<string, unknown> }>).map(([id, v]) => ({
+          id,
+          models: v.models ?? {},
+        }))
+      }
+    }
+    const alt = await this.client.provider.list() as unknown as { data?: unknown }
+    const altData = (alt as { data?: unknown }).data as unknown
+    if (altData && typeof altData === "object") {
+      const aobj = altData as Record<string, unknown>
+      if (Array.isArray(aobj.all)) {
+        return (aobj.all as Array<{ id: string; models?: Record<string, unknown> }>).map((p) => ({ id: p.id, models: p.models ?? {} }))
+      }
+      if (Array.isArray(altData)) return (altData as Array<{ id: string; models?: Record<string, unknown> }>).map((p) => ({ id: p.id, models: p.models ?? {} }))
+    }
+    return []
   }
 
   async deleteSession(sessionId: string): Promise<void> {

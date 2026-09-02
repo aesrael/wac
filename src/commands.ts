@@ -6,7 +6,7 @@ export type CommandResult =
   | { handled: true; text: string }
   | { handled: false; text?: undefined }
 
-const LOCAL_COMMANDS = new Set(["/help", "/status", "/sessions", "/session", "/new", "/clear", "/model", "/compact", "/current", "/delete"])
+const LOCAL_COMMANDS = new Set(["/help", "/status", "/sessions", "/session", "/new", "/clear", "/model", "/models", "/compact", "/current", "/delete"])
 
 export function isLocalCommand(text: string): boolean {
   const first = text.split(/\s+/, 1)[0]?.toLowerCase()
@@ -26,6 +26,7 @@ export function helpText(): string {
     "  /current    show the current session for this chat",
     "  /delete     delete the current session for this chat",
     "  /model <provider/model>  set model for this chat",
+    "  /models [n] list available models (default 20)",
     "  /status     connection status",
     "Anything else is sent to opencode as a prompt.",
   ].join("\n")
@@ -92,9 +93,20 @@ export async function handleCommand(
         if (!current.model) return { handled: true, text: "Model: (default — none set for this chat)" }
         return { handled: true, text: `Model: ${current.model}` }
       }
-      const record = await router.setModel(chatJid, args)
+      const record = await router.setModel(chatJid, args.replace(/\s+/g, ""))
       if (!record) return { handled: true, text: "No session for this chat yet; send a message first." }
       return { handled: true, text: `Model now: ${args}` }
+    }
+
+    case "/models": {
+      const n = args ? parseInt(args, 10) : 20
+      const limit = Number.isFinite(n) && n > 0 ? Math.min(n, 100) : 20
+      const providers = await client.listProviders()
+      const flat = providers.flatMap((p) => Object.keys(p.models).map((m) => `${p.id}/${m}`)).sort()
+      if (flat.length === 0) return { handled: true, text: "No models returned by opencode." }
+      const shown = flat.slice(0, limit)
+      const more = flat.length > limit ? `\n… and ${flat.length - limit} more (use /models ${flat.length} to see all)` : ""
+      return { handled: true, text: `Models (${shown.length}/${flat.length}):\n` + shown.map((m) => `• ${m}`).join("\n") + more }
     }
 
     case "/compact": {

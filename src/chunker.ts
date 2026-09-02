@@ -1,24 +1,16 @@
 export const MAX_CHUNK_SIZE = 4000
 
-export function prefixText(text: string, prefix: string): string {
-  return text
-    .split("\n")
-    .map((line) => (line.trim() ? `${prefix}${line}` : line))
-    .join("\n")
-}
-
 export function softFormat(text: string): string {
   return text
-    .replace(/```[a-zA-Z0-9_-]*\n?/g, "")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/^###+\s+/gm, "")
-    .replace(/^##\s+/gm, "")
-    .replace(/^#\s+/gm, "")
-    .replace(/\*\*([^*]+)\*\*/g, "$1")
-    .replace(/__([^_]+)__/g, "$1")
+    .replace(/```[a-zA-Z0-9_-]*\n/g, "```\n")
+    .replace(/^###+\s+(.*)$/gm, "*$1*")
+    .replace(/^##\s+(.*)$/gm, "*$1*")
+    .replace(/^#\s+(.*)$/gm, "*$1*")
+    .replace(/\*\*([^*]+)\*\*/g, "*$1*")
+    .replace(/__([^_]+)__/g, "*$1*")
     .replace(/^[-*]\s+/gm, "• ")
     .replace(/^\s*\d+[.)]\s+/gm, "• ")
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 $2")
     .replace(/\n{3,}/g, "\n\n")
     .trim()
 }

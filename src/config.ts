@@ -6,10 +6,12 @@ export const DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 export const DEFAULT_USERNAME = "opencode"
 
 export const DEFAULT_SYSTEM_PROMPT =
-  "You are wac, an assistant reached over WhatsApp. Replies are delivered as plain WhatsApp text messages. " +
+  "You are wac, an assistant reached over WhatsApp. Replies are delivered as WhatsApp text messages. " +
   "Keep responses concise and scannable: short paragraphs or brief bullet points, no long intros or apologies. " +
-  "Avoid heavy markdown that WhatsApp cannot render (no # headings, no tables, no ``` code fences, no [links](url) " +
-  "syntax); plain text is best. Answer the question directly, then stop."
+  "Use WhatsApp-native formatting where it helps: *bold*, _italic_, `inline code`, ```code blocks```, > quotes, and • bullet lists. " +
+  "Avoid # headings and | tables | (render as plain lists instead). For links use plain https:// URLs as tappable links — never wrap URLs in `backticks` or [markdown](url) syntax. " +
+  "Useful user commands: /help (list commands), /sessions (list sessions), /session <id> (switch), /new or /clear (fresh session), /model <provider/model> and /models [n] (model), /compact (summarize), /current (show session), /delete (remove), /status (connection). Explain them when asked. " +
+  "Answer directly, then stop."
 
 export type WacConfig = {
   allowlist: string[]
@@ -19,6 +21,8 @@ export type WacConfig = {
   name: string
   dataDir: string
   systemPrompt: string
+  opencodeDirectory: string
+  defaultModel?: string
 }
 
 export function defaultConfig(): WacConfig {
@@ -29,6 +33,8 @@ export function defaultConfig(): WacConfig {
     name: "wac",
     dataDir: join(homedir(), ".config", "wac"),
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
+    opencodeDirectory: join(homedir(), "Desktop"),
+    defaultModel: undefined,
   }
 }
 
@@ -55,6 +61,8 @@ export function loadConfig(overrides?: Partial<WacConfig>): WacConfig {
     config.opencodePassword = raw.opencodePassword ?? config.opencodePassword
     config.name = raw.name ?? config.name
     config.systemPrompt = raw.systemPrompt ?? config.systemPrompt
+    config.opencodeDirectory = raw.opencodeDirectory ?? config.opencodeDirectory
+    config.defaultModel = raw.defaultModel ?? config.defaultModel
     if (raw.dataDir) config.dataDir = resolve(raw.dataDir)
   } catch (error) {
     throw new Error(`missing or invalid config at ${path}; create it from config.example.json`)
@@ -63,15 +71,23 @@ export function loadConfig(overrides?: Partial<WacConfig>): WacConfig {
   if (process.env.OPENCODE_SERVER_PASSWORD) {
     config.opencodePassword = process.env.OPENCODE_SERVER_PASSWORD
   }
+  if (process.env.WAC_SYSTEM_PROMPT) {
+    config.systemPrompt = process.env.WAC_SYSTEM_PROMPT
+  }
 
   return config
 }
 
 export function writeConfig(config: WacConfig) {
   mkdirSync(config.dataDir, { recursive: true })
-  const { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, dataDir } = config
+  const { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, dataDir, systemPrompt, opencodeDirectory, defaultModel } =
+    config
   writeFileSync(
     join(dataDir, "config.json"),
-    JSON.stringify({ allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name }, null, 2) + "\n",
+    JSON.stringify(
+      { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, systemPrompt, opencodeDirectory, defaultModel },
+      null,
+      2,
+    ) + "\n",
   )
 }

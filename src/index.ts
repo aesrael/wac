@@ -42,15 +42,12 @@ function ensureConfig(): WacConfig {
   }
 }
 
-const REPLY_PREFIX = "> "
-
 async function sendChunked(whatsapp: WhatsAppClient, chatJid: string, text: string) {
   const cleaned = softFormat(text)
   const parts = withSuffix(chunk(cleaned))
   for (let i = 0; i < parts.length; i++) {
-    const body = i === 0 ? `${REPLY_PREFIX}${parts[i]}` : parts[i]
     try {
-      await whatsapp.sendText(chatJid, body)
+      await whatsapp.sendText(chatJid, parts[i])
     } catch (error) {
       console.error(`failed to send chunk ${i + 1}/${parts.length}: ${format(error)}`)
     }
@@ -76,11 +73,9 @@ async function handleIncoming(
   const { chatJid, senderJid, text, isGroup, fromMe } = event
 
   if (fromMe && !(await whatsapp.isAllowed(chatJid))) {
-    console.log(`ignoring own message in non-allowlisted chat ${chatJid}`)
     return
   }
   if (isGroup) {
-    console.log(`ignoring group message in ${chatJid} (groups not supported in v1)`)
     return
   }
   const effectiveSender = fromMe ? chatJid : senderJid
@@ -138,17 +133,16 @@ async function promptWithRetry(
   text: string,
   config: WacConfig,
 ) {
+  const effectiveModel = record.model ?? config.defaultModel
   const attempts = 3
   let lastError: unknown
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      return await opencode.prompt(record.sessionId, text, record.model, config.systemPrompt)
+      return await opencode.prompt(record.sessionId, text, effectiveModel, config.systemPrompt)
     } catch (error) {
       lastError = error
       if (attempt < attempts) {
-        const delay = 1500 * attempt
-        console.log(`prompt failed (attempt ${attempt}), retrying in ${delay}ms: ${format(error)}`)
-        await new Promise((resolve) => setTimeout(resolve, delay))
+        await new Promise((resolve) => setTimeout(resolve, 1500 * attempt))
       }
     }
   }
@@ -173,7 +167,30 @@ async function sendWelcome(whatsapp: WhatsAppClient, config: WacConfig) {
   }
 }
 
+function killStaleInstances() {
+  try {
+    const { execSync } = require("node:child_process") as typeof import("node:child_process")
+    const out = execSync('pgrep -f "node.*wac serve" || true', { encoding: "utf8" }).trim()
+    if (!out) return
+    const pids = out
+      .split("\n")
+      .map((s) => Number(s.trim()))
+      .filter((pid) => Number.isFinite(pid) && pid !== process.pid)
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGTERM")
+        console.log(`killed stale wac instance ${pid}`)
+      } catch {
+        /* already gone */
+      }
+    }
+  } catch {
+    /* best effort */
+  }
+}
+
 async function cmdServe() {
+  killStaleInstances()
   const config = ensureConfig()
   if (config.allowlist.length === 0) {
     fatal(`config "allowlist" is empty — add your WhatsApp number to ${configPath(config.dataDir)}`)
@@ -184,6 +201,7 @@ async function cmdServe() {
     baseUrl: config.opencodeBaseUrl,
     username: config.opencodeUsername,
     password: config.opencodePassword,
+    directory: config.opencodeDirectory,
   })
   const router = new SessionRouter(opencode, store)
   const whatsapp = new WhatsAppClient(config, authPath(config.dataDir))
@@ -221,10 +239,34 @@ async function cmdServe() {
   process.on("SIGTERM", () => void shutdown())
 
   const opencodeUp = await opencode.check()
-  if (!opencodeUp) console.log(`warning: opencode serve not reachable at ${config.opencodeBaseUrl} — will retry`)
-  else console.log(`opencode serve: reachable at ${config.opencodeBaseUrl}`)
+  if (!opencodeUp) {
+    console.log(`warning: opencode serve not reachable at ${config.opencodeBaseUrl} — will retry`)
+    ensureOpenCodeServer(config)
+  } else {
+    console.log(`opencode serve: reachable at ${config.opencodeBaseUrl}`)
+  }
 
   await whatsapp.start()
+}
+
+function ensureOpenCodeServer(config: WacConfig) {
+  try {
+    const url = new URL(config.opencodeBaseUrl)
+    const port = url.port || "8080"
+    const { spawn } = require("node:child_process") as typeof import("node:child_process")
+    const opencodeBin = process.env.OPENCODE_BIN || `${process.env.HOME}/.opencode/bin/opencode`
+    const env = { ...process.env }
+    if (config.opencodePassword) env.OPENCODE_SERVER_PASSWORD = config.opencodePassword
+    const child = spawn(opencodeBin, ["serve", "--hostname", "127.0.0.1", "--port", port], {
+      stdio: "ignore",
+      detached: true,
+      env,
+    })
+    child.unref()
+    console.log(`spawned opencode serve on :${port}`)
+  } catch (error) {
+    console.error(`could not spawn opencode serve: ${format(error)}`)
+  }
 }
 
 async function cmdQr() {
@@ -254,6 +296,7 @@ async function cmdStatus() {
       baseUrl: config.opencodeBaseUrl,
       username: config.opencodeUsername,
       password: config.opencodePassword,
+      directory: config.opencodeDirectory,
     })
     opencodeLine = opencodeOk ? "opencode serve: reachable" : "opencode serve: down (retrying)"
   } catch {

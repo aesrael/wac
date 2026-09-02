@@ -97,18 +97,11 @@ export class WhatsAppClient {
   private onMessagesUpsert(upsert: { messages: WAMessage[] }) {
     for (const msg of upsert.messages) {
       const event = this.extractMessage(msg)
-      if (!event) {
-        console.log(
-          `[wa] skipped message jid=${msg.key?.remoteJid} fromMe=${msg.key?.fromMe} hasText=${!!msg.message?.conversation || !!msg.message?.extendedTextMessage}`,
-        )
-        continue
-      }
+      if (!event) continue
       if (event.fromMe && this.recentOutgoing.has(event.messageId)) {
         this.recentOutgoing.delete(event.messageId)
-        console.log(`[wa] ignored our own outgoing message ${event.messageId}`)
         continue
       }
-      console.log(`[wa] received from=${event.senderJid} chat=${event.chatJid} group=${event.isGroup} fromMe=${event.fromMe} text="${event.text.slice(0, 60)}"`)
       void this.messageListener?.(event)
     }
   }
@@ -212,6 +205,16 @@ export class WhatsAppClient {
   async sendText(chatJid: string, text: string): Promise<void> {
     if (!text.trim()) return
     const content: AnyMessageContent = { text }
+    const result = await this.socket?.sendMessage(chatJid, content)
+    const id = result?.key?.id
+    if (id) {
+      this.recentOutgoing.add(id)
+      setTimeout(() => this.recentOutgoing.delete(id), 30_000)
+    }
+  }
+
+  async sendImage(chatJid: string, buffer: Buffer, caption?: string): Promise<void> {
+    const content: AnyMessageContent = { image: buffer, caption }
     const result = await this.socket?.sendMessage(chatJid, content)
     const id = result?.key?.id
     if (id) {

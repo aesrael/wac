@@ -9,7 +9,16 @@ export class SessionRouter {
 
   async resolve(chatJid: string): Promise<ChatSession> {
     const existing = this.store.get(chatJid)
-    if (existing) return existing
+    if (existing) {
+      try {
+        const serverSession = await this.client.getSession(existing.sessionId)
+        if (serverSession) return existing
+      } catch {
+        /* mapped session is gone server-side (e.g. opencode serve restarted and
+           lost its sessions); fall through and recreate a fresh one */
+      }
+      return await this.createForChat(chatJid, existing.title)
+    }
 
     const session = await this.createForChat(chatJid)
     return session
