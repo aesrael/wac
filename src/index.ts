@@ -46,8 +46,9 @@ async function sendChunked(whatsapp: WhatsAppClient, chatJid: string, text: stri
   const cleaned = softFormat(text)
   const parts = withSuffix(chunk(cleaned))
   for (let i = 0; i < parts.length; i++) {
+    const body = i === 0 ? `◆ wac\n\n${parts[i]}` : parts[i]
     try {
-      await whatsapp.sendText(chatJid, parts[i])
+      await whatsapp.sendText(chatJid, body)
     } catch (error) {
       console.error(`failed to send chunk ${i + 1}/${parts.length}: ${format(error)}`)
     }
@@ -155,7 +156,7 @@ function toJid(number: string): string {
 
 async function sendWelcome(whatsapp: WhatsAppClient, config: WacConfig) {
   const message = [
-    `wac is online. Send /help for commands, or just message me.`,
+    `☘️ wac is online — send /help for commands, or just message me.`,
   ].join("\n")
   for (const number of config.allowlist) {
     try {
