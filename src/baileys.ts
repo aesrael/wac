@@ -3,6 +3,7 @@ import makeWASocket, {
   type AnyMessageContent,
   type ConnectionState,
   type WAMessage,
+  downloadMediaMessage,
 } from "@whiskeysockets/baileys"
 import { useMultiFileAuthState } from "@whiskeysockets/baileys"
 import QRCode from "qrcode-terminal"
@@ -17,6 +18,7 @@ export type MessageEvent = {
   text: string
   isGroup: boolean
   fromMe: boolean
+  media?: { buffer: Buffer; mime: string; filename?: string }
 }
 
 export type StatusListener = (status: ConnectionStatus, qr?: string) => void
@@ -94,9 +96,9 @@ export class WhatsAppClient {
     }
   }
 
-  private onMessagesUpsert(upsert: { messages: WAMessage[] }) {
+  private async onMessagesUpsert(upsert: { messages: WAMessage[] }) {
     for (const msg of upsert.messages) {
-      const event = this.extractMessage(msg)
+      const event = await this.extractMessage(msg)
       if (!event) continue
       if (event.fromMe && this.recentOutgoing.has(event.messageId)) {
         this.recentOutgoing.delete(event.messageId)
@@ -106,26 +108,84 @@ export class WhatsAppClient {
     }
   }
 
-  private extractMessage(message: WAMessage): MessageEvent | undefined {
-    const content = message.message
-    if (!content) return undefined
+  private unwrap(content: NonNullable<WAMessage["message"]>): NonNullable<WAMessage["message"]> {
+    if (!content) return content
+    const any = content as Record<string, unknown>
+    if (any["ephemeralMessage"] && typeof any["ephemeralMessage"] === "object") {
+      const inner = (any["ephemeralMessage"] as { message?: NonNullable<WAMessage["message"]> }).message
+      if (inner) return this.unwrap(inner)
+    }
+    if (any["viewOnceMessage"] && typeof any["viewOnceMessage"] === "object") {
+      const inner = (any["viewOnceMessage"] as { message?: NonNullable<WAMessage["message"]> }).message
+      if (inner) return this.unwrap(inner)
+    }
+    if (any["viewOnceMessageV2"] && typeof any["viewOnceMessageV2"] === "object") {
+      const inner = (any["viewOnceMessageV2"] as { message?: NonNullable<WAMessage["message"]> }).message
+      if (inner) return this.unwrap(inner)
+    }
+    if (any["documentWithCaptionMessage"] && typeof any["documentWithCaptionMessage"] === "object") {
+      const inner = (any["documentWithCaptionMessage"] as { message?: NonNullable<WAMessage["message"]> }).message
+      if (inner) return this.unwrap(inner)
+    }
+    return content
+  }
+
+  private async extractMessage(message: WAMessage): Promise<MessageEvent | undefined> {
+    const raw = message.message
+    if (!raw) return undefined
+    const content = this.unwrap(raw)
     const text =
       content.conversation ??
       content.extendedTextMessage?.text ??
       content.imageMessage?.caption ??
       content.videoMessage?.caption ??
+      content.documentMessage?.caption ??
       ""
-    if (!text.trim()) return undefined
+
+    // detect media
+    const hasMedia =
+      !!content.imageMessage ||
+      !!content.videoMessage ||
+      !!content.documentMessage ||
+      !!content.audioMessage ||
+      !!content.stickerMessage
+
+    if (!text.trim() && !hasMedia) return undefined
 
     const chatJid = message.key.remoteJid ?? ""
     if (!chatJid) return undefined
     const isGroup = chatJid.endsWith("@g.us")
     const fromMe = message.key.fromMe === true
     const messageId = message.key.id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
-
     const senderJid = fromMe ? chatJid : (message.key.participant ?? chatJid)
 
-    return { messageId, chatJid, senderJid, text, isGroup, fromMe }
+    let media: { buffer: Buffer; mime: string; filename?: string } | undefined
+    if (hasMedia) {
+      try {
+        const buffer = (await downloadMediaMessage(message, "buffer", {} as never, undefined as never)) as Buffer
+        if (buffer && buffer.length) {
+          const mime =
+            content.imageMessage?.mimetype ??
+            content.videoMessage?.mimetype ??
+            content.documentMessage?.mimetype ??
+            content.audioMessage?.mimetype ??
+            content.stickerMessage?.mimetype ??
+            "application/octet-stream"
+          const filename =
+            content.documentMessage?.fileName ??
+            (content.imageMessage ? `image-${Date.now()}.jpg` : undefined) ??
+            (content.videoMessage ? `video-${Date.now()}.mp4` : undefined)
+          media = { buffer, mime, filename }
+        }
+      } catch {
+        // download failed — still forward text if any
+      }
+    }
+
+    // if no text and media failed to download, still drop to avoid empty prompts
+    if (!text.trim() && !media) return undefined
+
+    return { messageId, chatJid, senderJid, text, isGroup, fromMe, media }
   }
 
   async isAllowed(senderJid: string): Promise<boolean> {

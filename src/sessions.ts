@@ -21,16 +21,17 @@ export class SessionRouter {
       return await this.createForChat(chatJid, existing.title, existing.model ?? this.defaultModel)
     }
 
-    const session = await this.createForChat(chatJid, "Chat", this.defaultModel)
+    const session = await this.createForChat(chatJid, undefined, this.defaultModel)
     return session
   }
 
-  async createForChat(chatJid: string, title = "Chat", model?: string): Promise<ChatSession> {
-    const session = await this.client.createSession(title)
+  async createForChat(chatJid: string, title?: string, model?: string): Promise<ChatSession> {
+    const effectiveTitle = title && title.trim() ? title : undefined
+    const session = effectiveTitle ? await this.client.createSession(effectiveTitle) : await this.client.createSession("")
     const effectiveModel = model ?? this.store.get(chatJid)?.model ?? this.defaultModel
     const record: ChatSession = {
       sessionId: session.id,
-      title,
+      title: title ?? session.title ?? "",
       ...(effectiveModel ? { model: effectiveModel } : {}),
       createdAt: Date.now(),
       updatedAt: Date.now(),

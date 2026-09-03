@@ -115,10 +115,10 @@ async function processMessage(
   config: WacConfig,
   event: MessageEvent,
 ) {
-  const { chatJid, text } = event
+  const { chatJid, text, media } = event
   await whatsapp.startTyping(chatJid)
   try {
-    if (isLocalCommand(text)) {
+    if (text.trim() && isLocalCommand(text)) {
       const result = await handleCommand(router, opencode, config, chatJid, text)
       if (result.handled) {
         const s = router.chatSession(chatJid)
@@ -139,7 +139,7 @@ async function processMessage(
       }
     }
 
-    const result = await promptWithRetry(opencode, router, chatJid, record, text, config)
+    const result = await promptWithRetry(opencode, router, chatJid, record, text, config, media)
     await sendChunked(whatsapp, chatJid, result.text || "(no text reply)", wacLabel(record.sessionId, record.model ?? config.defaultModel))
   } catch (error) {
     console.error(`handler error: ${format(error)}`)
@@ -157,6 +157,7 @@ async function promptWithRetry(
   record: Awaited<ReturnType<SessionRouter["resolve"]>>,
   text: string,
   config: WacConfig,
+  media?: { buffer: Buffer; mime: string; filename?: string },
 ) {
   const effectiveModel = record.model ?? config.defaultModel
   if (!record.model && effectiveModel) {
@@ -167,7 +168,7 @@ async function promptWithRetry(
   let lastError: unknown
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      return await opencode.prompt(record.sessionId, text, effectiveModel, config.systemPrompt)
+      return await opencode.prompt(record.sessionId, text, effectiveModel, config.systemPrompt, media)
     } catch (error) {
       lastError = error
       if (attempt < attempts) {

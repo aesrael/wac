@@ -78,14 +78,30 @@ export class OpencodeClientFacade {
     return data(await this.client.session.create({ body: { title } }))
   }
 
-  async prompt(sessionId: string, text: string, model?: string, system?: string): Promise<PromptResult> {
+  async prompt(
+    sessionId: string,
+    text: string,
+    model?: string,
+    system?: string,
+    media?: { buffer: Buffer; mime: string; filename?: string } | { buffer: Buffer; mime: string; filename?: string }[],
+  ): Promise<PromptResult> {
     const providerID = model?.includes("/") ? model.slice(0, model.indexOf("/")) : undefined
     const modelID = model?.includes("/") ? model.slice(model.indexOf("/") + 1) : undefined
+    const mediaList = media ? (Array.isArray(media) ? media : [media]) : []
+    const parts: ({ type: "text"; text: string } | { type: "file"; mime: string; filename?: string; url: string })[] = []
+    const effectiveText = text.trim() || (mediaList.length ? "Describe this image and answer any question about it." : text)
+    if (effectiveText) parts.push({ type: "text", text: effectiveText } as const)
+    for (const m of mediaList) {
+      const b64 = m.buffer.toString("base64")
+      const url = `data:${m.mime};base64,${b64}`
+      parts.push({ type: "file", mime: m.mime, filename: m.filename ?? `file-${Date.now()}`, url })
+    }
+    if (parts.length === 0) parts.push({ type: "text", text })
     const result = data(
       await this.client.session.prompt({
         path: { id: sessionId },
         body: {
-          parts: [{ type: "text", text }],
+          parts: parts as never,
           ...(providerID && modelID ? { model: { providerID, modelID } } : {}),
           ...(system ? { system } : {}),
         },
