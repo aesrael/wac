@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -23,6 +23,7 @@ export type WacConfig = {
   systemPrompt: string
   opencodeDirectory: string
   defaultModel?: string
+  allowCrossSessionAdmin?: boolean
 }
 
 export function defaultConfig(): WacConfig {
@@ -35,6 +36,7 @@ export function defaultConfig(): WacConfig {
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     opencodeDirectory: join(homedir(), "Desktop"),
     defaultModel: undefined,
+    allowCrossSessionAdmin: false,
   }
 }
 
@@ -43,8 +45,10 @@ export const storePath = (dataDir: string) => join(dataDir, "store.json")
 export const authPath = (dataDir: string) => join(dataDir, "auth")
 
 export function ensureDataDir(wac: WacConfig) {
-  mkdirSync(wac.dataDir, { recursive: true })
-  mkdirSync(authPath(wac.dataDir), { recursive: true })
+  mkdirSync(wac.dataDir, { recursive: true, mode: 0o700 })
+  mkdirSync(authPath(wac.dataDir), { recursive: true, mode: 0o700 })
+  chmodSync(wac.dataDir, 0o700)
+  chmodSync(authPath(wac.dataDir), 0o700)
 }
 
 export function loadConfig(overrides?: Partial<WacConfig>): WacConfig {
@@ -63,6 +67,7 @@ export function loadConfig(overrides?: Partial<WacConfig>): WacConfig {
     config.systemPrompt = raw.systemPrompt ?? config.systemPrompt
     config.opencodeDirectory = raw.opencodeDirectory ?? config.opencodeDirectory
     config.defaultModel = raw.defaultModel ?? config.defaultModel
+    config.allowCrossSessionAdmin = raw.allowCrossSessionAdmin ?? config.allowCrossSessionAdmin
     if (raw.dataDir) config.dataDir = resolve(raw.dataDir)
   } catch (error) {
     throw new Error(`missing or invalid config at ${path}; create it from config.example.json`)
@@ -80,14 +85,16 @@ export function loadConfig(overrides?: Partial<WacConfig>): WacConfig {
 
 export function writeConfig(config: WacConfig) {
   mkdirSync(config.dataDir, { recursive: true })
-  const { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, dataDir, systemPrompt, opencodeDirectory, defaultModel } =
+  const { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, dataDir, systemPrompt, opencodeDirectory, defaultModel, allowCrossSessionAdmin } =
     config
+  const path = join(dataDir, "config.json")
   writeFileSync(
-    join(dataDir, "config.json"),
+    path,
     JSON.stringify(
-      { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, systemPrompt, opencodeDirectory, defaultModel },
+      { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, systemPrompt, opencodeDirectory, defaultModel, allowCrossSessionAdmin },
       null,
       2,
     ) + "\n",
   )
+  chmodSync(path, 0o600)
 }

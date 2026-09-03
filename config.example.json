@@ -1,8 +1,9 @@
 {
-  "allowlist": ["12025550123"],
+  "allowlist": ["<your-e164-number>"],
   "opencodeBaseUrl": "http://127.0.0.1:8080",
   "opencodeUsername": "opencode",
   "name": "wac",
-  "opencodeDirectory": "/Users/you/Desktop",
-  "defaultModel": "opencode/big-pickle"
+  "opencodeDirectory": "<project-directory>",
+  "defaultModel": "opencode/big-pickle",
+  "allowCrossSessionAdmin": false
 }

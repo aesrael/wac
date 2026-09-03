@@ -5,13 +5,15 @@
   "private": true,
   "type": "module",
   "bin": {
-    "wac": "./wac"
+    "wac": "./wac",
+    "wac-start": "./bin/wac-start"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsx wac serve",
     "serve": "node wac serve",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "launchd": "node scripts/install-launchd.mjs"
   },
   "engines": {
     "node": ">=22"

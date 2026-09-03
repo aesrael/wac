@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { format } from "node:util"
 import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync } from "node:fs"
+import { execFileSync, spawn } from "node:child_process"
 import { join } from "node:path"
 import { authPath, configPath, defaultConfig, ensureDataDir, loadConfig, writeConfig } from "./config.js"
 import type { WacConfig } from "./config.js"
@@ -90,15 +91,15 @@ async function handleIncoming(
 ) {
   const { chatJid, senderJid, text, isGroup, fromMe } = event
 
-  if (fromMe && !(await whatsapp.isAllowed(chatJid))) {
-    return
+  if (fromMe && !(await whatsapp.isSelfChat(chatJid))) {
+    return // outbound to another chat (incl. Meta AI rooms): never process
   }
   if (isGroup) {
     return
   }
   const effectiveSender = fromMe ? chatJid : senderJid
   if (!(await whatsapp.isAllowed(effectiveSender))) {
-    return // non-allowlisted: silent drop, never enqueued, never logged
+    return // non-allowlisted: silent drop, never enqueued
   }
 
   await enqueue(chatJid, () => processMessage(whatsapp, opencode, router, config, event))
@@ -207,7 +208,12 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig) {
   const dir = join(config.dataDir, "outbox")
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   const failures = new Map<string, number>()
+  let running = false
+  const allowed = new Set(config.allowlist.map(toJid))
   const poll = async () => {
+    if (running) return
+    running = true
+    try {
     let files: string[]
     try {
       files = readdirSync(dir).filter((f) => f.endsWith(".json"))
@@ -227,7 +233,9 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig) {
           ageMin > 5
             ? `(queued ${new Date(msg.created as number).toLocaleString()})\n\n${msg.text}`
             : msg.text
-        const to = msg.to && msg.to.includes("@") ? msg.to : toJid(config.allowlist[0])
+        const to = msg.to ? msg.to : toJid(config.allowlist[0])
+        if (!allowed.has(to) || !to.endsWith("@s.whatsapp.net")) throw new Error("outbox recipient is not allowlisted")
+        if (msg.text.length > 100_000) throw new Error("outbox message is too large")
         await whatsapp.sendText(to, body)
         unlinkSync(path)
         failures.delete(file)
@@ -246,6 +254,7 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig) {
         }
       }
     }
+    } finally { running = false }
   }
   setInterval(() => {
     void poll()
@@ -271,9 +280,8 @@ function killStaleInstances() {
   // session store, and each answers the other's echoes — a self-talk loop.
   // SIGKILL can't hang the way SIGTERM+socket.close() can. Verify after.
   try {
-    const { execSync } = require("node:child_process") as typeof import("node:child_process")
     const list = (): number[] => {
-      const out = execSync('pgrep -f "node.*wac serve" || true', { encoding: "utf8" }).trim()
+      const out = execFileSync("pgrep", ["-f", "node.*wac serve"], { encoding: "utf8" }).trim()
       if (!out) return []
       return out
         .split("\n")
@@ -358,8 +366,7 @@ function ensureOpenCodeServer(config: WacConfig) {
   try {
     const url = new URL(config.opencodeBaseUrl)
     const port = url.port || "8080"
-    const { spawn } = require("node:child_process") as typeof import("node:child_process")
-    const opencodeBin = process.env.OPENCODE_BIN || `${process.env.HOME}/.opencode/bin/opencode`
+    const opencodeBin = process.env.OPENCODE_BIN || join(process.env.HOME ?? "", ".opencode/bin/opencode")
     const env = { ...process.env }
     if (config.opencodePassword) env.OPENCODE_SERVER_PASSWORD = config.opencodePassword
     const child = spawn(opencodeBin, ["serve", "--hostname", "127.0.0.1", "--port", port], {

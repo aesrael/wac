@@ -21,8 +21,11 @@ function authHeader(auth: OpenCodeAuth): Record<string, string> | undefined {
 }
 
 export function makeClient(auth: OpenCodeAuth): OpencodeClient {
+  const url = new URL(auth.baseUrl)
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1"
+  if (!loopback && url.protocol !== "https:") throw new Error("opencodeBaseUrl must use HTTPS unless it is loopback")
   return createOpencodeClient({
-    baseUrl: auth.baseUrl as `${string}://${string}`,
+    baseUrl: url.toString() as `${string}://${string}`,
     headers: authHeader(auth),
     directory: auth.directory,
     throwOnError: true,

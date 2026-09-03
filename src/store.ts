@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 export type ChatSession = {
@@ -24,6 +24,7 @@ export class Store {
     this.dir = dir
     this.path = join(dir, "store.json")
     mkdirSync(dir, { recursive: true })
+    chmodSync(dir, 0o700)
     this.data = this.read()
   }
 
@@ -75,8 +76,10 @@ export class Store {
     try {
       writeFileSync(tmp, JSON.stringify(this.data, null, 2) + "\n")
       renameSync(tmp, this.path)
+      chmodSync(this.path, 0o600)
     } catch {
       writeFileSync(this.path, JSON.stringify(this.data, null, 2) + "\n")
+      chmodSync(this.path, 0o600)
     }
   }
 }

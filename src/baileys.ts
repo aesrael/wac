@@ -22,6 +22,7 @@ export type MessageEvent = {
 }
 
 export type StatusListener = (status: ConnectionStatus, qr?: string) => void
+const MAX_MEDIA_BYTES = 25 * 1024 * 1024
 
 export class WhatsAppClient {
   private socket: ReturnType<typeof makeWASocket> | undefined
@@ -96,7 +97,8 @@ export class WhatsAppClient {
     }
   }
 
-  private async onMessagesUpsert(upsert: { messages: WAMessage[] }) {
+  private async onMessagesUpsert(upsert: { messages: WAMessage[]; type: string }) {
+    if (upsert.type !== "notify") return // ignore history backfills/appends
     for (const msg of upsert.messages) {
       const event = await this.extractMessage(msg)
       if (!event) continue
@@ -163,7 +165,7 @@ export class WhatsAppClient {
     if (hasMedia) {
       try {
         const buffer = (await downloadMediaMessage(message, "buffer", {} as never, undefined as never)) as Buffer
-        if (buffer && buffer.length) {
+        if (buffer && buffer.length && buffer.length <= MAX_MEDIA_BYTES) {
           const mime =
             content.imageMessage?.mimetype ??
             content.videoMessage?.mimetype ??
@@ -175,7 +177,7 @@ export class WhatsAppClient {
             content.documentMessage?.fileName ??
             (content.imageMessage ? `image-${Date.now()}.jpg` : undefined) ??
             (content.videoMessage ? `video-${Date.now()}.mp4` : undefined)
-          media = { buffer, mime, filename }
+          media = { buffer, mime: mime.slice(0, 100), filename: filename?.slice(0, 255) }
         }
       } catch {
         // download failed — still forward text if any
@@ -192,6 +194,38 @@ export class WhatsAppClient {
     if (!senderJid) return false
     if (senderJid.endsWith("@g.us") || senderJid.endsWith("@newsletter") || senderJid.endsWith("@broadcast")) return false
     return this.config.allowlist.length > 0 && (await this.normalizeJid(senderJid))
+  }
+
+  /** Device-identity self check: does this chat belong to our own account?
+   *  Stricter than the allowlist (which can misresolve via LID mapping).
+   *  fromMe messages are only processed in true self-chat. */
+  selfIds(): string[] {
+    const u = this.socket?.user as { id?: string; lid?: string } | undefined
+    const out: string[] = []
+    if (u?.id) out.push(u.id)
+    if (u?.lid && !out.includes(u.lid)) out.push(u.lid)
+    return out
+  }
+
+  async isSelfChat(chatJid: string): Promise<boolean> {
+    if (!chatJid) return false
+    const bare = (j: string) => j.split("@")[0].split("$")[0].split(":")[0].replace(/\D/g, "")
+    const bareChat = bare(chatJid)
+    const self = this.selfIds()
+    if (self.length === 0) return this.isAllowed(chatJid) // not connected yet — fall back
+    for (const s of self) {
+      if (s === chatJid || bare(s) === bareChat) return true
+    }
+    // LID<->PN alias: resolve both directions before giving up
+    try {
+      const resolved = await this.resolveLid(chatJid)
+      for (const s of self) {
+        if (s === resolved || bare(s) === bare(resolved)) return true
+      }
+    } catch {
+      /* ignore */
+    }
+    return false
   }
 
   private async resolveLid(jid: string): Promise<string> {

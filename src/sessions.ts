@@ -98,6 +98,12 @@ export class SessionRouter {
     return Object.keys(this.store.all()).length
   }
 
+  async listSessionsForChat(chatJid: string): Promise<Array<{ sessionId: string; title: string; chats: string[] }>> {
+    const current = this.store.get(chatJid)
+    if (!current) return []
+    return (await this.listSessions()).filter((s) => s.sessionId === current.sessionId)
+  }
+
   async deleteChatSession(chatJid: string): Promise<ChatSession | undefined> {
     const record = this.store.get(chatJid)
     if (!record) return undefined

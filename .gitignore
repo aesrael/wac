@@ -2,3 +2,10 @@ node_modules/
 dist/
 .DS_Store
 *.log
+config.json
+store.json
+auth/
+outbox/
+*.plist
+bin/wac-start
+scripts/install-launchd.mjs

@@ -1,8 +1,8 @@
 {
   "version": 1,
   "chats": {
-    "12025550123@s.whatsapp.net": {
-      "sessionId": "b38c2f8e-...-...",
+    "<number>@s.whatsapp.net": {
+      "sessionId": "<session-id>",
       "title": "Chat",
       "model": "anthropic/claude-sonnet-4",
       "createdAt": 1760000000000,

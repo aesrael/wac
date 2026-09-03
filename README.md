@@ -42,23 +42,19 @@ Config (`~/.config/wac/config.json`):
 
 ```json
 {
-  "allowlist": ["447900000000"],
+  "allowlist": ["<your-e164-number>"],
   "opencodeBaseUrl": "http://127.0.0.1:8080",
   "name": "wac",
-  "opencodeDirectory": "/Users/you/Desktop",
+  "opencodeDirectory": "<project-directory>",
   "defaultModel": "opencode/big-pickle"
 }
 ```
 
 - `allowlist` — E.164 numbers, fail-closed.
+- `allowCrossSessionAdmin` — optional and false by default; enables cross-session management commands.
+- `npm run launchd` — installs Wac as a macOS LaunchAgent; the generated plist and logs stay outside Git.
 - `opencodePassword` — or `OPENCODE_SERVER_PASSWORD` env. Wac passes it to `opencode serve` if it spawns it.
 - Wac auto-spawns `opencode serve` if not reachable.
-
-**Always-on (optional):**
-
-```sh
-npm run launchd   # generates ~/Library/LaunchAgents/com.user.wac.plist from config.json
-```
 
 ## Commands
 

@@ -14,8 +14,8 @@ export function isLocalCommand(text: string): boolean {
   return LOCAL_COMMANDS.has(first)
 }
 
-async function sessionByArg(router: SessionRouter, arg: string): Promise<string | undefined> {
-  const list = await router.listSessions()
+async function sessionByArg(router: SessionRouter, chatJid: string, arg: string, crossSession: boolean): Promise<string | undefined> {
+  const list = crossSession ? await router.listSessions() : await router.listSessionsForChat(chatJid)
   const clean = arg.replace(/[[\]]/g, "").trim()
   if (/^\d+$/.test(clean)) {
     const picked = list[Number(clean)]
@@ -72,7 +72,7 @@ export async function handleCommand(
     }
 
     case "/sessions": {
-      const list = await router.listSessions()
+      const list = config.allowCrossSessionAdmin ? await router.listSessions() : await router.listSessionsForChat(chatJid)
       if (list.length === 0) return { handled: true, text: "No sessions yet." }
       const lines = list.map((s, i) => {
         const marker = s.chats.length > 0 ? s.chats.join(", ") : "unmapped"
@@ -84,8 +84,11 @@ export async function handleCommand(
     case "/session": {
       if (!args) return { handled: true, text: "Usage: /session <id|[n]>\nGet numbers from /sessions." }
       let target = args
-      const byIndex = await sessionByArg(router, args)
+      const byIndex = await sessionByArg(router, chatJid, args, config.allowCrossSessionAdmin === true)
       if (byIndex) target = byIndex
+      if (!config.allowCrossSessionAdmin && target !== router.chatSession(chatJid)?.sessionId) {
+        return { handled: true, text: "Session switching is restricted to this chat's mapped session." }
+      }
       const record = await router.switchChat(chatJid, target)
       if (!record) return { handled: true, text: `No session found with id ${args}.` }
       return { handled: true, text: `Switched this chat to session ${record.sessionId}.` }
@@ -108,14 +111,13 @@ export async function handleCommand(
         const suffix = current?.model ? "" : " (default)"
         return { handled: true, text: `Model: ${effective}${suffix}` }
       }
-      const record = await router.setModel(chatJid, args.replace(/\s+/g, ""))
-      if (!record) return { handled: true, text: "No session for this chat yet; send a message first." }
+      const previousModel = current?.model
+      const candidate = args.replace(/\s+/g, "")
       const dirties = await client.listProviders()
       const flat = dirties.flatMap((p) => Object.keys(p.models).map((m) => `${p.id}/${m}`))
-      if (!flat.includes(record.model ?? "")) {
-        await router.setModel(chatJid, current?.model ?? "")
-        return { handled: true, text: `Unknown model ${args}. Not set. Use /models to list valid ones.` }
-      }
+      if (!flat.includes(candidate)) return { handled: true, text: `Unknown model ${args}. Not set. Use /models to list valid ones.` }
+      const record = await router.setModel(chatJid, candidate)
+      if (!record) return { handled: true, text: "No session for this chat yet; send a message first." }
       return { handled: true, text: `Model now: ${args}` }
     }
 
@@ -134,7 +136,7 @@ export async function handleCommand(
       let sid = router.chatSession(chatJid)?.sessionId
       if (!sid) return { handled: true, text: "No session for this chat yet; send a message first." }
       if (args) {
-        const target = await sessionByArg(router, args)
+        const target = await sessionByArg(router, chatJid, args, config.allowCrossSessionAdmin === true)
         if (!target) return { handled: true, text: `No session at index ${args}. Use /sessions to list.` }
         sid = target
       }
@@ -153,7 +155,7 @@ export async function handleCommand(
 
     case "/delete": {
       if (args) {
-        const target = await sessionByArg(router, args)
+        const target = await sessionByArg(router, chatJid, args, config.allowCrossSessionAdmin === true)
         if (!target) return { handled: true, text: `No session at index ${args}. Use /sessions to list.` }
         await client.deleteSession(target)
         // if it was this chat's session, clear the mapping too
