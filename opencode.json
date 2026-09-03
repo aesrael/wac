@@ -1,4 +1,37 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "permission": "allow"
+  "permission": {
+    "*": "allow",
+    "read": {
+      "*": "allow",
+      "~/.config/wac/auth/**": "deny",
+      "~/.config/wac/config.json": "deny",
+      "~/.config/opencode/auth.json": "deny",
+      "*.env": "deny",
+      "*.env.*": "deny"
+    },
+    "edit": {
+      "*": "allow",
+      "~/.config/wac/auth/**": "deny",
+      "~/.config/wac/config.json": "deny",
+      "~/.config/opencode/auth.json": "deny",
+      "*.env": "deny",
+      "*.env.*": "deny"
+    },
+    "glob": {
+      "*": "allow",
+      "~/.config/wac/**": "deny"
+    },
+    "grep": {
+      "*": "allow",
+      "~/.config/wac/**": "deny"
+    },
+    "bash": {
+      "*": "allow",
+      "*wac/auth*": "deny",
+      "*wac/config.json*": "deny",
+      "*opencode/auth.json*": "deny",
+      "*.env*": "deny"
+    }
+  }
 }
