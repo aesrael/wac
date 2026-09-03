@@ -6,7 +6,7 @@ export type CommandResult =
   | { handled: true; text: string }
   | { handled: false; text?: undefined }
 
-const LOCAL_COMMANDS = new Set(["/help", "/status", "/sessions", "/session", "/new", "/clear", "/model", "/models", "/compact", "/current", "/delete"])
+const LOCAL_COMMANDS = new Set(["/help", "/status", "/sessions", "/session", "/new", "/clear", "/fork", "/model", "/models", "/compact", "/current", "/delete"])
 
 export function isLocalCommand(text: string): boolean {
   const first = text.split(/\s+/, 1)[0]?.toLowerCase()
@@ -22,6 +22,7 @@ export function helpText(): string {
     "  /session <id>  switch this chat to another session",
     "  /new        reset: create a fresh session",
     "  /clear      same as /new",
+    "  /fork [message-id]  fork this chat's session at a message point",
     "  /compact    compact the current session",
     "  /current    show the current session for this chat",
     "  /delete     delete the current session for this chat",
@@ -130,6 +131,12 @@ export async function handleCommand(
       const record = await router.deleteChatSession(chatJid)
       if (!record) return { handled: true, text: "No session for this chat yet." }
       return { handled: true, text: `Deleted session ${record.sessionId}. Next message will start a fresh one.` }
+    }
+
+    case "/fork": {
+      const record = await router.forkChat(chatJid, args || undefined)
+      if (!record) return { handled: true, text: "No session for this chat yet; send a message first." }
+      return { handled: true, text: `Forked this chat to session ${record.sessionId}. Previous conversation is kept on the server.` }
     }
 
     default:

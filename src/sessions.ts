@@ -26,8 +26,8 @@ export class SessionRouter {
   }
 
   async createForChat(chatJid: string, title?: string, model?: string): Promise<ChatSession> {
-    const effectiveTitle = title && title.trim() ? title : undefined
-    const session = effectiveTitle ? await this.client.createSession(effectiveTitle) : await this.client.createSession("")
+    const effectiveTitle = title && title.trim() ? title.trim() : undefined
+    const session = await this.client.createSession(effectiveTitle)
     const effectiveModel = model ?? this.store.get(chatJid)?.model ?? this.defaultModel
     const record: ChatSession = {
       sessionId: session.id,
@@ -99,6 +99,21 @@ export class SessionRouter {
       /* session may already be gone server-side; still clear the mapping */
     }
     this.store.delete(chatJid)
+    return record
+  }
+
+  async forkChat(chatJid: string, messageID?: string): Promise<ChatSession | undefined> {
+    const existing = this.store.get(chatJid)
+    if (!existing) return undefined
+    const forked = await this.client.forkSession(existing.sessionId, messageID)
+    const record: ChatSession = {
+      sessionId: forked.id,
+      title: forked.title || existing.title || forked.id,
+      ...(existing.model ? { model: existing.model } : {}),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    this.store.set(chatJid, record)
     return record
   }
 

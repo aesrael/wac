@@ -74,8 +74,9 @@ export class OpencodeClientFacade {
     return data(await this.client.session.get({ path: { id: sessionId } }))
   }
 
-  async createSession(title: string): Promise<Session> {
-    return data(await this.client.session.create({ body: { title } }))
+  async createSession(title?: string): Promise<Session> {
+    const trimmed = title?.trim()
+    return data(await this.client.session.create({ body: trimmed ? { title: trimmed } : {} }))
   }
 
   async prompt(
@@ -176,5 +177,15 @@ export class OpencodeClientFacade {
 
   async deleteSession(sessionId: string): Promise<void> {
     await this.client.session.delete({ path: { id: sessionId } })
+  }
+
+  async forkSession(sessionId: string, messageID?: string): Promise<Session> {
+    const trimmed = messageID?.trim()
+    return data(
+      await this.client.session.fork({
+        path: { id: sessionId },
+        body: trimmed ? { messageID: trimmed } : {},
+      }),
+    )
   }
 }

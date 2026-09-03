@@ -71,6 +71,7 @@ DM the bot:
 | `/sessions` | list sessions + chat mapping |
 | `/session <id>` | switch this chat to another session |
 | `/new` `/clear` | fresh session for this chat |
+| `/fork [message-id]` | fork this chat's session at a message point |
 | `/current` | current session (+ model) |
 | `/delete` | delete current session |
 | `/model` | show chat's model |
