@@ -9,6 +9,7 @@ import { OpencodeClientFacade, reachable } from "./serve-client.js"
 import { SessionRouter } from "./sessions.js"
 import { Store } from "./store.js"
 import { chunk, softFormat, withSuffix } from "./chunker.js"
+import { partsEmpty } from "./serve-client.js"
 import { handleCommand, isLocalCommand, handlePassthrough } from "./commands.js"
 
 const BIN = "wac"
@@ -67,7 +68,7 @@ function wacLabel(sessionId?: string, model?: string): string {
   const parts: string[] = []
   if (short) parts.push(`_${short}_`)
   if (model) parts.push(`_${model}_`)
-  if (parts.length === 0) return "◆ wac"
+  if (parts.length === 0) return "◆ wac  ·  *no active session*"
   return `◆ wac  ·  ${parts.join(" · ")}`
 }
 
@@ -97,8 +98,7 @@ async function handleIncoming(
   }
   const effectiveSender = fromMe ? chatJid : senderJid
   if (!(await whatsapp.isAllowed(effectiveSender))) {
-    console.log(`ignoring message from non-allowlisted sender ${effectiveSender}`)
-    return
+    return // non-allowlisted: silent drop, never enqueued, never logged
   }
 
   await enqueue(chatJid, () => processMessage(whatsapp, opencode, router, config, event))
@@ -140,11 +140,17 @@ async function processMessage(
     }
 
     const result = await promptWithRetry(opencode, router, chatJid, record, text, config, media)
+    if (result.isEmpty || result.error) {
+      await sendChunked(whatsapp, chatJid, `(error) ${result.error ?? "model returned nothing readable — wrong or unpaid model?"}`, wacLabel(record.sessionId, record.model ?? config.defaultModel))
+      return
+    }
     await sendChunked(whatsapp, chatJid, result.text || "(no text reply)", wacLabel(record.sessionId, record.model ?? config.defaultModel))
   } catch (error) {
     console.error(`handler error: ${format(error)}`)
     const s = router.chatSession(chatJid)
-    await sendChunked(whatsapp, chatJid, `(error) ${(error as Error).message}`, wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
+    const label = wacLabel(s?.sessionId, s?.model ?? config.defaultModel)
+    const msg = error instanceof Error ? error.message : String(error)
+    await sendChunked(whatsapp, chatJid, `(error) ${msg}`, label)
   } finally {
     await whatsapp.stopTyping(chatJid)
   }
@@ -261,17 +267,22 @@ async function sendWelcome(whatsapp: WhatsAppClient, config: WacConfig) {
 }
 
 function killStaleInstances() {
+  // Rough on purpose: duplicate daemons share the WhatsApp socket and the
+  // session store, and each answers the other's echoes — a self-talk loop.
+  // SIGKILL can't hang the way SIGTERM+socket.close() can. Verify after.
   try {
     const { execSync } = require("node:child_process") as typeof import("node:child_process")
-    const out = execSync('pgrep -f "node.*wac serve" || true', { encoding: "utf8" }).trim()
-    if (!out) return
-    const pids = out
-      .split("\n")
-      .map((s) => Number(s.trim()))
-      .filter((pid) => Number.isFinite(pid) && pid !== process.pid)
-    for (const pid of pids) {
+    const list = (): number[] => {
+      const out = execSync('pgrep -f "node.*wac serve" || true', { encoding: "utf8" }).trim()
+      if (!out) return []
+      return out
+        .split("\n")
+        .map((s) => Number(s.trim()))
+        .filter((pid) => Number.isFinite(pid) && pid !== process.pid)
+    }
+    for (const pid of list()) {
       try {
-        process.kill(pid, "SIGTERM")
+        process.kill(pid, "SIGKILL")
         console.log(`killed stale wac instance ${pid}`)
       } catch {
         /* already gone */

@@ -42,6 +42,14 @@ export class SessionRouter {
 
   async switchChat(chatJid: string, sessionIdOrPrefix: string): Promise<ChatSession | undefined> {
     let sessionId = sessionIdOrPrefix
+    // numeric index -> the session in that line of the /sessions listing (0-based)
+    if (/^\d+$/.test(sessionIdOrPrefix)) {
+      const idx = Number(sessionIdOrPrefix)
+      const list = await this.listSessions()
+      const picked = list[idx]
+      if (!picked) return undefined
+      sessionId = picked.sessionId
+    }
     try {
       await this.client.getSession(sessionIdOrPrefix)
     } catch {

@@ -14,12 +14,22 @@ export function isLocalCommand(text: string): boolean {
   return LOCAL_COMMANDS.has(first)
 }
 
+async function sessionByArg(router: SessionRouter, arg: string): Promise<string | undefined> {
+  const list = await router.listSessions()
+  const clean = arg.replace(/[[\]]/g, "").trim()
+  if (/^\d+$/.test(clean)) {
+    const picked = list[Number(clean)]
+    return picked?.sessionId
+  }
+  return undefined
+}
+
 export function helpText(): string {
   return [
     "Commands:",
     "  /help       this help",
     "  /sessions   list opencode sessions",
-    "  /session <id>  switch this chat to another session",
+    "  /session <id|[n]> switch this chat to another session (0 = current, 1 = previous, …)",
     "  /new        reset: create a fresh session",
     "  /clear      same as /new",
     "  /fork [message-id]  fork this chat's session at a message point",
@@ -64,18 +74,21 @@ export async function handleCommand(
     case "/sessions": {
       const list = await router.listSessions()
       if (list.length === 0) return { handled: true, text: "No sessions yet." }
-      const lines = list.map((s) => {
+      const lines = list.map((s, i) => {
         const marker = s.chats.length > 0 ? s.chats.join(", ") : "unmapped"
-        return `• ${s.sessionId}  ${s.title || "(untitled)"}  [${marker}]`
+        return `${i} · ${s.title || "(untitled)"}  (${s.sessionId.slice(0, 8)})${s.chats.length ? " ← this chat" : ""}`
       })
       return { handled: true, text: lines.join("\n") }
     }
 
     case "/session": {
-      if (!args) return { handled: true, text: "Usage: /session <session-id>\nGet ids from /sessions." }
-      const record = await router.switchChat(chatJid, args)
+      if (!args) return { handled: true, text: "Usage: /session <id|[n]>\nGet numbers from /sessions." }
+      let target = args
+      const byIndex = await sessionByArg(router, args)
+      if (byIndex) target = byIndex
+      const record = await router.switchChat(chatJid, target)
       if (!record) return { handled: true, text: `No session found with id ${args}.` }
-      return { handled: true, text: `Switched this chat to session ${args}.` }
+      return { handled: true, text: `Switched this chat to session ${record.sessionId}.` }
     }
 
     case "/new":
@@ -97,6 +110,12 @@ export async function handleCommand(
       }
       const record = await router.setModel(chatJid, args.replace(/\s+/g, ""))
       if (!record) return { handled: true, text: "No session for this chat yet; send a message first." }
+      const dirties = await client.listProviders()
+      const flat = dirties.flatMap((p) => Object.keys(p.models).map((m) => `${p.id}/${m}`))
+      if (!flat.includes(record.model ?? "")) {
+        await router.setModel(chatJid, current?.model ?? "")
+        return { handled: true, text: `Unknown model ${args}. Not set. Use /models to list valid ones.` }
+      }
       return { handled: true, text: `Model now: ${args}` }
     }
 
@@ -104,7 +123,7 @@ export async function handleCommand(
       const n = args ? parseInt(args, 10) : 20
       const limit = Number.isFinite(n) && n > 0 ? Math.min(n, 100) : 20
       const providers = await client.listProviders()
-      const flat = providers.flatMap((p) => Object.keys(p.models).map((m) => `${p.id}/${m}`)).sort()
+      const flat = providers.flatMap((p) => Object.keys(p.models).map((m) => `${p.id}/${m}`))
       if (flat.length === 0) return { handled: true, text: "No models returned by opencode." }
       const shown = flat.slice(0, limit)
       const more = flat.length > limit ? `\n… and ${flat.length - limit} more (use /models ${flat.length} to see all)` : ""
@@ -112,11 +131,16 @@ export async function handleCommand(
     }
 
     case "/compact": {
-      const record = router.chatSession(chatJid)
-      if (!record) return { handled: true, text: "No session for this chat yet; send a message first." }
-      const effective = record.model ?? config.defaultModel
-      await client.summarize(record.sessionId, effective)
-      return { handled: true, text: "Compacting session…" }
+      let sid = router.chatSession(chatJid)?.sessionId
+      if (!sid) return { handled: true, text: "No session for this chat yet; send a message first." }
+      if (args) {
+        const target = await sessionByArg(router, args)
+        if (!target) return { handled: true, text: `No session at index ${args}. Use /sessions to list.` }
+        sid = target
+      }
+      const effective = router.chatSession(chatJid)?.model ?? config.defaultModel
+      await client.summarize(sid, effective)
+      return { handled: true, text: `Compacting ${sid.slice(0, 8)}…` }
     }
 
     case "/current": {
@@ -128,6 +152,15 @@ export async function handleCommand(
     }
 
     case "/delete": {
+      if (args) {
+        const target = await sessionByArg(router, args)
+        if (!target) return { handled: true, text: `No session at index ${args}. Use /sessions to list.` }
+        await client.deleteSession(target)
+        // if it was this chat's session, clear the mapping too
+        const cur = router.chatSession(chatJid)
+        if (cur?.sessionId === target) await router.deleteChatSession(chatJid)
+        return { handled: true, text: `Deleted session ${target.slice(0, 8)}. Next message will start a fresh one.` }
+      }
       const record = await router.deleteChatSession(chatJid)
       if (!record) return { handled: true, text: "No session for this chat yet." }
       return { handled: true, text: `Deleted session ${record.sessionId}. Next message will start a fresh one.` }

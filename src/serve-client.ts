@@ -41,14 +41,29 @@ export async function reachable(auth: OpenCodeAuth): Promise<boolean> {
 export type PromptResult = {
   message: AssistantMessage
   text: string
+  isEmpty: boolean
+  error?: string | null
 }
 
 export function partsToText(parts: Part[]): string {
-  return parts
-    .filter((part): part is Extract<Part, { type: "text" }> => part.type === "text" && !part.synthetic)
-    .map((part) => part.text)
-    .join("")
-    .trim()
+  const kept = parts.filter((p): p is Extract<Part, { type: "text" }> => p.type === "text" && !p.synthetic)
+  const text = kept.map((p) => p.text).join("").trim()
+  return text
+}
+
+export function partsEmpty(parts: Part[]): boolean {
+  const text = partsToText(parts)
+  if (text) return false
+  const nonText = parts.filter((p) => p.type !== "text")
+  return nonText.length > 0 || parts.length === 0
+}
+
+function assistantError(info: AssistantMessage): string | null {
+  if (!info.error) return null
+  const e = info.error
+  const data = (e as { data?: { message?: string } }).data
+  const msg = data?.message?.trim() ? data.message.trim() : e.name
+  return msg
 }
 
 export class OpencodeClientFacade {
@@ -111,6 +126,8 @@ export class OpencodeClientFacade {
     return {
       message: result.info,
       text: partsToText(result.parts),
+      isEmpty: partsEmpty(result.parts),
+      error: assistantError(result.info),
     }
   }
 
