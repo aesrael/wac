@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { format } from "node:util"
+import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync } from "node:fs"
+import { join } from "node:path"
 import { authPath, configPath, defaultConfig, ensureDataDir, loadConfig, writeConfig } from "./config.js"
 import type { WacConfig } from "./config.js"
 import { WhatsAppClient, hasCredentials, type MessageEvent } from "./baileys.js"
@@ -180,6 +182,69 @@ function toJid(number: string): string {
   return number.includes("@") ? number : `${number.replace(/^\+/, "")}@s.whatsapp.net`
 }
 
+const OUTBOX_POLL_MS = 15_000
+
+type OutboxMessage = {
+  to?: string
+  text?: string
+  created?: number
+}
+
+/**
+ * Outbox queue: external tools (e.g. terminus schedule) drop
+ * `{ to?, text, created? }` JSON files into `<dataDir>/outbox/`.
+ * The daemon sends them through its own socket (no second Baileys
+ * connection) and deletes on success. Stale files get an age prefix.
+ */
+function startOutbox(whatsapp: WhatsAppClient, config: WacConfig) {
+  const dir = join(config.dataDir, "outbox")
+  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const failures = new Map<string, number>()
+  const poll = async () => {
+    let files: string[]
+    try {
+      files = readdirSync(dir).filter((f) => f.endsWith(".json"))
+    } catch {
+      return
+    }
+    for (const file of files) {
+      const path = join(dir, file)
+      try {
+        const msg = JSON.parse(readFileSync(path, "utf8")) as OutboxMessage
+        if (!msg.text?.trim()) {
+          unlinkSync(path)
+          continue
+        }
+        const ageMin = msg.created ? (Date.now() - msg.created) / 60000 : 0
+        const body =
+          ageMin > 5
+            ? `(queued ${new Date(msg.created as number).toLocaleString()})\n\n${msg.text}`
+            : msg.text
+        const to = msg.to && msg.to.includes("@") ? msg.to : toJid(config.allowlist[0])
+        await whatsapp.sendText(to, body)
+        unlinkSync(path)
+        failures.delete(file)
+        console.log(`outbox sent ${file}`)
+      } catch (error) {
+        const n = (failures.get(file) ?? 0) + 1
+        failures.set(file, n)
+        console.error(`outbox failed ${file} (attempt ${n}): ${format(error)}`)
+        if (n >= 5) {
+          try {
+            renameSync(path, `${path}.dead`)
+          } catch {
+            /* already gone */
+          }
+          failures.delete(file)
+        }
+      }
+    }
+  }
+  setInterval(() => {
+    void poll()
+  }, OUTBOX_POLL_MS)
+}
+
 async function sendWelcome(whatsapp: WhatsAppClient, config: WacConfig) {
   const message = [
     `☘️ wac is online — send /help for commands, or just message me.`,
@@ -250,6 +315,7 @@ async function cmdServe() {
   }
 
   whatsapp.messageListener = (event) => handleIncoming(whatsapp, opencode, router, config, event)
+  startOutbox(whatsapp, config)
 
   const creds = await hasCredentials(authPath(config.dataDir))
   if (!creds) {

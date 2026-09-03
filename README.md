@@ -89,6 +89,18 @@ node wac qr       # show QR and exit once linked
 node wac serve    # start daemon
 ```
 
+## Outbox
+
+External tools can send WhatsApp through the daemon's own socket — no second
+connection. Drop `{ to?, text, created? }` JSON into `~/.config/wac/outbox/`:
+
+```sh
+python3 -c "import json,time; json.dump({'text':'hello','created':int(time.time()*1000)}, open('$HOME/.config/wac/outbox/hi.json','w'))"
+```
+
+Sent within ~15s, deleted on success, renamed `.dead` after 5 failures. Missing
+`to` → first allowlisted number. Files queued >5 min get a staleness prefix.
+
 ## Troubleshooting
 
 | Symptom | Fix |
