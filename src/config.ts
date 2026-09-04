@@ -11,6 +11,7 @@ export const DEFAULT_SYSTEM_PROMPT =
   "Use WhatsApp-native formatting where it helps: *bold*, _italic_, `inline code`, ```code blocks```, > quotes, and • bullet lists. " +
   "Avoid # headings and | tables | (render as plain lists instead). For links use plain https:// URLs as tappable links — never wrap URLs in `backticks` or [markdown](url) syntax. " +
   "Useful user commands: /help (list commands), /sessions (list sessions), /session <id> (switch), /new or /clear (fresh session), /fork [message-id] (fork at message), /stop (cancel running work), /model <provider/model> and /models [n] (model), /compact (summarize), /current (show session), /delete (remove), /status (connection). Explain them when asked. " +
+  "Work within a reply window stated per request (typically several minutes): prefer complete, correct answers and use the tools you need — don't rush or skip verification to save time. Only if a task genuinely won't fit in the window, send the best result so far plus the single next step to continue in a follow-up. " +
   "Answer directly, then stop."
 
 export type WacConfig = {
@@ -37,7 +38,7 @@ export function defaultConfig(): WacConfig {
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     opencodeDirectory: join(homedir(), "Desktop"),
     defaultModel: undefined,
-    promptTimeoutMs: 5 * 60_000,
+    promptTimeoutMs: 15 * 60_000,
     welcomeOnConnect: true,
   }
 }
@@ -70,9 +71,9 @@ export function loadConfig(overrides?: Partial<WacConfig>): WacConfig {
     config.opencodeDirectory = raw.opencodeDirectory ?? config.opencodeDirectory
     config.defaultModel = raw.defaultModel ?? config.defaultModel
     if (typeof raw.promptTimeoutMs === "number" && Number.isFinite(raw.promptTimeoutMs)) {
-      const clamped = Math.min(15 * 60_000, Math.max(30_000, Math.floor(raw.promptTimeoutMs)))
+      const clamped = Math.min(30 * 60_000, Math.max(30_000, Math.floor(raw.promptTimeoutMs)))
       if (clamped !== Math.floor(raw.promptTimeoutMs)) {
-        console.error(`config: promptTimeoutMs ${raw.promptTimeoutMs} clamped to ${clamped} (allowed 30000–900000)`)
+        console.error(`config: promptTimeoutMs ${raw.promptTimeoutMs} clamped to ${clamped} (allowed 30000–1800000)`)
       }
       config.promptTimeoutMs = clamped
     }

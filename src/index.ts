@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { format } from "node:util"
-import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, unlinkSync } from "node:fs"
 import { execFileSync, spawn } from "node:child_process"
 import { join, normalize, resolve } from "node:path"
 import { authPath, configPath, defaultConfig, ensureDataDir, loadConfig, writeConfig } from "./config.js"
@@ -69,8 +69,8 @@ function wacLabel(sessionId?: string, model?: string): string {
   const parts: string[] = []
   if (short) parts.push(`_${short}_`)
   if (model) parts.push(`_${model}_`)
-  if (parts.length === 0) return "◆ wac  ·  *no active session*"
-  return `◆ wac  ·  ${parts.join(" · ")}`
+  const line = parts.length === 0 ? "◆ wac · *no active session*" : `◆ wac · ${parts.join(" · ")}`
+  return `> ${line}`
 }
 
 const chatQueues = new Map<string, Promise<void>>()
@@ -176,12 +176,22 @@ async function processMessage(
     console.error(`handler error: ${format(error)}`)
     const s = router.chatSession(chatJid)
     const label = wacLabel(s?.sessionId, s?.model ?? config.defaultModel)
-    const msg =
-      error instanceof PromptTimeoutError
-        ? "Still working in the background past the timeout — nothing was cancelled. Ask for status, or send /stop to cancel."
-        : error instanceof Error
-          ? error.message
-          : String(error)
+    let msg: string
+    if (error instanceof PromptTimeoutError) {
+      // Fail-fast: abort server-side work so nothing is left running,
+      // then terminate. Never retry — re-issuing duplicates side effects.
+      try {
+        if (s?.sessionId) await opencode.abortSession(s.sessionId)
+      } catch {
+        /* abort best-effort; session may already be idle */
+      }
+      const secs = Math.round(config.promptTimeoutMs / 1000)
+      msg = `timed out after ${secs}s, cancelled — nothing left running. Send /new for a fresh session or ask in smaller chunks.`
+    } else if (error instanceof Error) {
+      msg = error.message
+    } else {
+      msg = String(error)
+    }
     await sendChunked(whatsapp, chatJid, `(error) ${msg}`, label)
   } finally {
     await whatsapp.stopTyping(chatJid)
@@ -204,9 +214,11 @@ async function promptWithRetry(
   }
   // Single attempt, never retry a prompt: opencode may already have executed
   // tools server-side, so re-issuing duplicates side effects. On timeout the
-  // server-side work is left running (never auto-abort); the user can /stop it.
+  // caller aborts the session (fail-fast); nothing is left running.
+  const mins = Math.max(1, Math.round(config.promptTimeoutMs / 60000))
+  const system = `${config.systemPrompt} Reply window: ~${mins} min. Prefer a complete, correct answer; only send a partial plus the next step if it genuinely won't fit.`
   return await promptWithTimeout(
-    opencode.prompt(record.sessionId, text, effectiveModel, config.systemPrompt, media),
+    opencode.prompt(record.sessionId, text, effectiveModel, system, media),
     config.promptTimeoutMs,
   )
 }
@@ -304,35 +316,42 @@ async function sendWelcome(whatsapp: WhatsAppClient, config: WacConfig) {
   }
 }
 
-function killStaleInstances() {
-  // Rough on purpose: duplicate daemons share the WhatsApp socket and the
-  // session store, and each answers the other's echoes — a self-talk loop.
-  // SIGKILL can't hang the way SIGTERM+socket.close() can. Verify after.
+function pidPath(dataDir: string): string {
+  return join(dataDir, "daemon.pid")
+}
+
+function acquireLock(dataDir: string): void {
+  const path = pidPath(dataDir)
   try {
-    const list = (): number[] => {
-      const out = execFileSync("pgrep", ["-f", "node.*wac serve"], { encoding: "utf8" }).trim()
-      if (!out) return []
-      return out
-        .split("\n")
-        .map((s) => Number(s.trim()))
-        .filter((pid) => Number.isFinite(pid) && pid !== process.pid)
-    }
-    for (const pid of list()) {
-      try {
-        process.kill(pid, "SIGKILL")
-        console.log(`killed stale wac instance ${pid}`)
-      } catch {
-        /* already gone */
+    const existing = readFileSync(path, "utf8").trim()
+    if (existing) {
+      const pid = Number(existing)
+      if (Number.isFinite(pid) && pid !== process.pid) {
+        try {
+          process.kill(pid, 0) // signal 0: existence check only
+          const out = execFileSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" }).trim()
+          if (out && (out.includes("node") || out.includes("wac"))) {
+            console.error(`wac is already running (PID ${pid}) — exiting`)
+            process.exit(0)
+          }
+        } catch {
+          /* stale lock — fall through and overwrite */
+        }
       }
     }
   } catch {
-    /* best effort */
+    /* no pid file yet */
   }
+  writeFileSync(path, String(process.pid))
+  // auto-release on exit
+  process.on("exit", () => {
+    try { unlinkSync(path) } catch { /* best effort */ }
+  })
 }
 
 async function cmdServe() {
-  killStaleInstances()
   const config = ensureConfig()
+  acquireLock(config.dataDir)
   if (config.allowlist.length === 0) {
     fatal(`config "allowlist" is empty — add your WhatsApp number to ${configPath(config.dataDir)}`)
   }
@@ -347,6 +366,7 @@ async function cmdServe() {
   const router = new SessionRouter(opencode, store, config.defaultModel)
   const whatsapp = new WhatsAppClient(config, authPath(config.dataDir))
   let welcomeSent = false
+  const opencodeChildren = new Set<number>()
 
   whatsapp.statusListener = (status, qr) => {
     const line =
@@ -377,6 +397,9 @@ async function cmdServe() {
     console.log("shutting down…")
     await whatsapp.shutdown()
     store.flush()
+    for (const pid of opencodeChildren) {
+      try { process.kill(pid, "SIGTERM") } catch { /* best effort */ }
+    }
     process.exit(0)
   }
   process.on("SIGINT", () => void shutdown())
@@ -385,7 +408,8 @@ async function cmdServe() {
   const opencodeUp = await opencode.check()
   if (!opencodeUp) {
     console.log(`warning: opencode serve not reachable at ${config.opencodeBaseUrl} — will retry`)
-    ensureOpenCodeServer(config)
+    const child = ensureOpenCodeServer(config)
+    if (child && child.pid) opencodeChildren.add(child.pid)
   } else {
     console.log(`opencode serve: reachable at ${config.opencodeBaseUrl}`)
   }
@@ -393,7 +417,7 @@ async function cmdServe() {
   await whatsapp.start()
 }
 
-function ensureOpenCodeServer(config: WacConfig) {
+function ensureOpenCodeServer(config: WacConfig): import("node:child_process").ChildProcess | undefined {
   try {
     const url = new URL(config.opencodeBaseUrl)
     const port = url.port || "8080"
@@ -418,8 +442,10 @@ function ensureOpenCodeServer(config: WacConfig) {
     })
     child.unref()
     console.log(`spawned opencode serve on :${port}`)
+    return child
   } catch (error) {
     console.error(`could not spawn opencode serve: ${format(error)}`)
+    return undefined
   }
 }
 

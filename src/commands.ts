@@ -1,6 +1,7 @@
 import type { WacConfig } from "./config.js"
 import { OpencodeClientFacade } from "./serve-client.js"
 import type { SessionRouter } from "./sessions.js"
+import type { ChatSession } from "./store.js"
 
 export type CommandResult =
   | { handled: true; text: string }
@@ -22,6 +23,44 @@ async function sessionByArg(router: SessionRouter, chatJid: string, arg: string,
     return picked?.sessionId
   }
   return undefined
+}
+
+async function sessionInfoText(
+  client: OpencodeClientFacade,
+  config: WacConfig,
+  record: ChatSession,
+  heading: string,
+  showId = true,
+): Promise<string> {
+  const effective = record.model ?? config.defaultModel
+  // Live server title wins — the store copy goes stale when opencode renames sessions.
+  let title = record.title?.trim() ?? ""
+  let created = 0
+  try {
+    if (record.sessionId) {
+      const live = await client.getSession(record.sessionId)
+      if (live.title?.trim()) title = live.title.trim()
+      created = live.time?.created ?? 0
+    }
+  } catch {
+    /* opencode down: fall back to stored title */
+  }
+  const fmtDate = (ms: number) => {
+    if (!ms) return "unknown"
+    try {
+      return new Date(ms).toLocaleString("en-GB", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })
+    } catch {
+      return "unknown"
+    }
+  }
+  const lines = [
+    heading,
+    ...(showId ? [`• *Session:* \`${record.sessionId}\``] : []),
+    `• *Title:* ${title || "untitled"}`,
+    `• *Model:* ${effective ?? "default"}${effective && !record.model ? " (default)" : ""}`,
+    `• *Created:* ${fmtDate(created)}`,
+  ]
+  return lines.join("\n")
 }
 
 export function helpText(): string {
@@ -91,7 +130,7 @@ export async function handleCommand(
       if (byIndex) target = byIndex
       const record = await router.switchChat(chatJid, target)
       if (!record) return { handled: true, text: `No session found with id ${args}.` }
-      return { handled: true, text: `Switched this chat to session ${record.sessionId}.` }
+      return { handled: true, text: await sessionInfoText(client, config, record, `*Switched to session \`${record.sessionId}\`*`, false) }
     }
 
     case "/new":
@@ -157,9 +196,7 @@ export async function handleCommand(
     case "/current": {
       const record = router.chatSession(chatJid)
       if (!record) return { handled: true, text: "No session for this chat yet." }
-      const effective = record.model ?? config.defaultModel
-      const model = effective ? ` (model: ${effective}${record.model ? "" : " — default"})` : ""
-      return { handled: true, text: `Session: ${record.sessionId}${model}` }
+      return { handled: true, text: await sessionInfoText(client, config, record, "*Current session*") }
     }
 
     case "/delete": {

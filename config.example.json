@@ -5,6 +5,6 @@
   "name": "wac",
   "opencodeDirectory": "<project-directory>",
   "defaultModel": "opencode/big-pickle",
-  "promptTimeoutMs": 300000,
+  "promptTimeoutMs": 600000,
   "welcomeOnConnect": true
 }
