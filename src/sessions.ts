@@ -10,7 +10,7 @@ export class SessionRouter {
 
   async resolve(chatJid: string): Promise<ChatSession> {
     const existing = this.store.get(chatJid)
-    if (existing) {
+    if (existing?.sessionId) {
       try {
         const serverSession = await this.client.getSession(existing.sessionId)
         if (serverSession) return existing
@@ -51,7 +51,7 @@ export class SessionRouter {
       sessionId = picked.sessionId
     }
     try {
-      await this.client.getSession(sessionIdOrPrefix)
+      await this.client.getSession(sessionId)
     } catch {
       const matches = (await this.client.listSessions()).filter((s) => s.id.startsWith(sessionIdOrPrefix))
       if (matches.length !== 1) return undefined
@@ -74,7 +74,19 @@ export class SessionRouter {
 
   async setModel(chatJid: string, model: string): Promise<ChatSession | undefined> {
     const existing = this.store.get(chatJid)
-    if (!existing) return undefined
+    if (!existing) {
+      // No session yet: persist a pending model so the next message uses it.
+      // resolve() picks up existing.model when it creates the session.
+      const pending: ChatSession = {
+        sessionId: "",
+        title: "",
+        model,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }
+      this.store.set(chatJid, pending)
+      return pending
+    }
     existing.model = model
     existing.updatedAt = Date.now()
     this.store.set(chatJid, existing)
@@ -136,6 +148,7 @@ export class SessionRouter {
     const byId = new Map(server.map((s) => [s.id, s]))
     const result: Array<{ sessionId: string; title: string; chats: string[] }> = []
     for (const [chat, record] of Object.entries(this.store.all())) {
+      if (!record.sessionId) continue // pending /model preset, no server session yet
       const meta = byId.get(record.sessionId)
       result.push({
         sessionId: record.sessionId,

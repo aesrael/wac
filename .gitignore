@@ -7,5 +7,6 @@ store.json
 auth/
 outbox/
 *.plist
-bin/wac-start
-scripts/install-launchd.mjs
+*.dead
+*.tmp
+logs/

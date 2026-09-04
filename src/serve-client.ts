@@ -55,18 +55,15 @@ export function partsToText(parts: Part[]): string {
 }
 
 export function partsEmpty(parts: Part[]): boolean {
-  const text = partsToText(parts)
-  if (text) return false
-  const nonText = parts.filter((p) => p.type !== "text")
-  return nonText.length > 0 || parts.length === 0
+  // Tool-only turns (bash/edit with no text part) are real work, not errors.
+  return parts.length === 0
 }
 
 function assistantError(info: AssistantMessage): string | null {
   if (!info.error) return null
-  const e = info.error
-  const data = (e as { data?: { message?: string } }).data
-  const msg = data?.message?.trim() ? data.message.trim() : e.name
-  return msg
+  const e = info.error as { name?: string; message?: string; data?: { message?: string } }
+  const msg = e.data?.message?.trim() ? e.data.message.trim() : e.message?.trim() ? e.message.trim() : e.name
+  return msg ?? "unknown error"
 }
 
 export class OpencodeClientFacade {
@@ -90,6 +87,10 @@ export class OpencodeClientFacade {
 
   async getSession(sessionId: string): Promise<Session> {
     return data(await this.client.session.get({ path: { id: sessionId } }))
+  }
+
+  async abortSession(sessionId: string): Promise<void> {
+    await this.client.session.abort({ path: { id: sessionId } })
   }
 
   async createSession(title?: string): Promise<Session> {

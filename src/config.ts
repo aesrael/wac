@@ -10,7 +10,7 @@ export const DEFAULT_SYSTEM_PROMPT =
   "Keep responses concise and scannable: short paragraphs or brief bullet points, no long intros or apologies. " +
   "Use WhatsApp-native formatting where it helps: *bold*, _italic_, `inline code`, ```code blocks```, > quotes, and • bullet lists. " +
   "Avoid # headings and | tables | (render as plain lists instead). For links use plain https:// URLs as tappable links — never wrap URLs in `backticks` or [markdown](url) syntax. " +
-  "Useful user commands: /help (list commands), /sessions (list sessions), /session <id> (switch), /new or /clear (fresh session), /model <provider/model> and /models [n] (model), /compact (summarize), /current (show session), /delete (remove), /status (connection). Explain them when asked. " +
+  "Useful user commands: /help (list commands), /sessions (list sessions), /session <id> (switch), /new or /clear (fresh session), /fork [message-id] (fork at message), /stop (cancel running work), /model <provider/model> and /models [n] (model), /compact (summarize), /current (show session), /delete (remove), /status (connection). Explain them when asked. " +
   "Answer directly, then stop."
 
 export type WacConfig = {
@@ -23,7 +23,8 @@ export type WacConfig = {
   systemPrompt: string
   opencodeDirectory: string
   defaultModel?: string
-  allowCrossSessionAdmin?: boolean
+  promptTimeoutMs: number
+  welcomeOnConnect?: boolean
 }
 
 export function defaultConfig(): WacConfig {
@@ -36,7 +37,8 @@ export function defaultConfig(): WacConfig {
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     opencodeDirectory: join(homedir(), "Desktop"),
     defaultModel: undefined,
-    allowCrossSessionAdmin: false,
+    promptTimeoutMs: 5 * 60_000,
+    welcomeOnConnect: true,
   }
 }
 
@@ -67,7 +69,14 @@ export function loadConfig(overrides?: Partial<WacConfig>): WacConfig {
     config.systemPrompt = raw.systemPrompt ?? config.systemPrompt
     config.opencodeDirectory = raw.opencodeDirectory ?? config.opencodeDirectory
     config.defaultModel = raw.defaultModel ?? config.defaultModel
-    config.allowCrossSessionAdmin = raw.allowCrossSessionAdmin ?? config.allowCrossSessionAdmin
+    if (typeof raw.promptTimeoutMs === "number" && Number.isFinite(raw.promptTimeoutMs)) {
+      const clamped = Math.min(15 * 60_000, Math.max(30_000, Math.floor(raw.promptTimeoutMs)))
+      if (clamped !== Math.floor(raw.promptTimeoutMs)) {
+        console.error(`config: promptTimeoutMs ${raw.promptTimeoutMs} clamped to ${clamped} (allowed 30000–900000)`)
+      }
+      config.promptTimeoutMs = clamped
+    }
+    config.welcomeOnConnect = raw.welcomeOnConnect ?? config.welcomeOnConnect
     if (raw.dataDir) config.dataDir = resolve(raw.dataDir)
   } catch (error) {
     throw new Error(`missing or invalid config at ${path}; create it from config.example.json`)
@@ -85,13 +94,13 @@ export function loadConfig(overrides?: Partial<WacConfig>): WacConfig {
 
 export function writeConfig(config: WacConfig) {
   mkdirSync(config.dataDir, { recursive: true })
-  const { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, dataDir, systemPrompt, opencodeDirectory, defaultModel, allowCrossSessionAdmin } =
+  const { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, dataDir, systemPrompt, opencodeDirectory, defaultModel, promptTimeoutMs, welcomeOnConnect } =
     config
   const path = join(dataDir, "config.json")
   writeFileSync(
     path,
     JSON.stringify(
-      { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, systemPrompt, opencodeDirectory, defaultModel, allowCrossSessionAdmin },
+      { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, systemPrompt, opencodeDirectory, defaultModel, promptTimeoutMs, welcomeOnConnect },
       null,
       2,
     ) + "\n",

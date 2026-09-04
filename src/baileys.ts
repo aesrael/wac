@@ -19,6 +19,7 @@ export type MessageEvent = {
   isGroup: boolean
   fromMe: boolean
   media?: { buffer: Buffer; mime: string; filename?: string }
+  mediaError?: "too-large" | "download-failed"
 }
 
 export type StatusListener = (status: ConnectionStatus, qr?: string) => void
@@ -66,7 +67,13 @@ export class WhatsAppClient {
     if (qr) {
       this.status = "qr"
       this.statusListener?.(this.status, qr)
-      QRCode.generate(qr, { small: true }, (code: string) => process.stdout.write(`${code}\n`))
+      // Never print pairing QR into daemon logs (launchd captures stdout):
+      // only render on an interactive TTY like `wac qr`.
+      if (process.stdout.isTTY) {
+        QRCode.generate(qr, { small: true }, (code: string) => process.stdout.write(`${code}\n`))
+      } else {
+        console.log("WhatsApp: needs QR — run `wac qr` on a terminal to link (QR redacted from logs)")
+      }
     }
 
     if (connection === "close") {
@@ -99,8 +106,10 @@ export class WhatsAppClient {
 
   private async onMessagesUpsert(upsert: { messages: WAMessage[]; type: string }) {
     if (upsert.type !== "notify") return // ignore history backfills/appends
-    for (const msg of upsert.messages) {
-      const event = await this.extractMessage(msg)
+    // Extract concurrently so one 25MB download doesn't stall other chats;
+    // per-chat ordering is still enforced downstream by the enqueue queue.
+    const events = await Promise.all(upsert.messages.map((msg) => this.extractMessage(msg)))
+    for (const event of events) {
       if (!event) continue
       if (event.fromMe && this.recentOutgoing.has(event.messageId)) {
         this.recentOutgoing.delete(event.messageId)
@@ -162,6 +171,7 @@ export class WhatsAppClient {
     const senderJid = fromMe ? chatJid : (message.key.participant ?? chatJid)
 
     let media: { buffer: Buffer; mime: string; filename?: string } | undefined
+    let mediaError: MessageEvent["mediaError"]
     if (hasMedia) {
       try {
         const buffer = (await downloadMediaMessage(message, "buffer", {} as never, undefined as never)) as Buffer
@@ -178,16 +188,24 @@ export class WhatsAppClient {
             (content.imageMessage ? `image-${Date.now()}.jpg` : undefined) ??
             (content.videoMessage ? `video-${Date.now()}.mp4` : undefined)
           media = { buffer, mime: mime.slice(0, 100), filename: filename?.slice(0, 255) }
+        } else if (buffer && buffer.length > MAX_MEDIA_BYTES) {
+          mediaError = "too-large"
+        } else {
+          mediaError = "download-failed"
         }
       } catch {
-        // download failed — still forward text if any
+        // download failed — still forward text if any, else report the failure
+        mediaError = "download-failed"
       }
     }
 
-    // if no text and media failed to download, still drop to avoid empty prompts
-    if (!text.trim() && !media) return undefined
+    // if no text and media failed, report the failure instead of silent drop
+    if (!text.trim() && !media) {
+      if (mediaError) return { messageId, chatJid, senderJid, text, isGroup, fromMe, mediaError }
+      return undefined
+    }
 
-    return { messageId, chatJid, senderJid, text, isGroup, fromMe, media }
+    return { messageId, chatJid, senderJid, text, isGroup, fromMe, media, mediaError }
   }
 
   async isAllowed(senderJid: string): Promise<boolean> {
@@ -250,16 +268,17 @@ export class WhatsAppClient {
   }
 
   private async normalizeJid(jid: string): Promise<boolean> {
+    const sanitize = (s: string) => s.split("@")[0].split(":")[0].replace(/\D/g, "")
     const resolved = await this.resolveLid(jid)
-    const bare = resolved.split("@")[0]
+    const bare = sanitize(resolved)
     for (const entry of this.config.allowlist) {
-      const norm = entry.split("@")[0]
-      if (entry === resolved || norm === bare) return true
+      const norm = sanitize(entry)
+      if (entry === resolved || (norm && norm === bare)) return true
     }
     if (jid.endsWith("@lid")) {
       const lid = jid.split("@")[0]
       for (const entry of this.config.allowlist) {
-        const norm = entry.split("@")[0]
+        const norm = sanitize(entry)
         try {
           const entryLid = await this.socket?.signalRepository.lidMapping.getLIDForPN(norm)
           if (entryLid === lid) return true
@@ -299,16 +318,6 @@ export class WhatsAppClient {
   async sendText(chatJid: string, text: string): Promise<void> {
     if (!text.trim()) return
     const content: AnyMessageContent = { text }
-    const result = await this.socket?.sendMessage(chatJid, content)
-    const id = result?.key?.id
-    if (id) {
-      this.recentOutgoing.add(id)
-      setTimeout(() => this.recentOutgoing.delete(id), 30_000)
-    }
-  }
-
-  async sendImage(chatJid: string, buffer: Buffer, caption?: string): Promise<void> {
-    const content: AnyMessageContent = { image: buffer, caption }
     const result = await this.socket?.sendMessage(chatJid, content)
     const id = result?.key?.id
     if (id) {

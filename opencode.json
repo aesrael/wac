@@ -6,6 +6,9 @@
       "*": "allow",
       "~/.config/wac/auth/**": "deny",
       "~/.config/wac/config.json": "deny",
+      "~/.config/wac/store.json": "deny",
+      "~/.config/wac/outbox/**": "deny",
+      "~/.config/wac/logs/**": "deny",
       "~/.config/opencode/auth.json": "deny",
       "*.env": "deny",
       "*.env.*": "deny"
@@ -14,6 +17,9 @@
       "*": "allow",
       "~/.config/wac/auth/**": "deny",
       "~/.config/wac/config.json": "deny",
+      "~/.config/wac/store.json": "deny",
+      "~/.config/wac/outbox/**": "deny",
+      "~/.config/wac/logs/**": "deny",
       "~/.config/opencode/auth.json": "deny",
       "*.env": "deny",
       "*.env.*": "deny"
@@ -30,8 +36,13 @@
       "*": "allow",
       "*wac/auth*": "deny",
       "*wac/config.json*": "deny",
+      "*wac/store.json*": "deny",
+      "*wac/outbox*": "deny",
+      "*wac/logs*": "deny",
       "*opencode/auth.json*": "deny",
-      "*.env*": "deny"
+      "*.env*": "deny",
+      "*OPENCODE_SERVER_PASSWORD*": "deny",
+      "*printenv*": "deny"
     }
   }
 }

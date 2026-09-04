@@ -42,11 +42,23 @@ function isForbidden(position: number, ranges: Array<[number, number]>): boolean
   return ranges.some(([start, end]) => position > start && position < end)
 }
 
-function isMaybeForbiddenBacktick(text: string, position: number): boolean {
-  const before = text.slice(0, position)
-  const fenceTicks = (before.match(/`{3,}/g) || []).reduce((a, b) => a + b.length, 0)
-  const inlineTicks = before.match(/`/g)?.length ?? 0
-  return inlineTicks % 2 === 1 && fenceTicks === 0
+// Prefix parity of single backticks outside fenced ranges, computed once per
+// input so per-cut checks are O(1). Triple-fence ticks are part of ranges and
+// excluded from the parity count.
+function inlineParityPrefix(text: string, ranges: Array<[number, number]>): Uint8Array {
+  const parity = new Uint8Array(text.length + 1)
+  let odd = 0
+  const inFence = (i: number) => ranges.some(([s, e]) => i >= s && i < e)
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "`" && !inFence(i)) {
+      // skip ticks that are part of a ``` run (fence boundaries may sit
+      // exactly on range edges, so guard locally too)
+      const run3 = text.startsWith("```", i) || (i >= 2 && text.startsWith("```", i - 2)) || (i >= 1 && text.startsWith("```", i - 1))
+      if (!run3) odd ^= 1
+    }
+    parity[i + 1] = odd
+  }
+  return parity
 }
 
 export function chunk(text: string, max: number = MAX_CHUNK_SIZE): string[] {
@@ -55,6 +67,8 @@ export function chunk(text: string, max: number = MAX_CHUNK_SIZE): string[] {
   if (input.length <= max) return [input]
 
   const fences = codeFenceRanges(input)
+  const parity = inlineParityPrefix(input, fences)
+  const isSplitForbidden = (pos: number) => isForbidden(pos, fences) || parity[Math.min(pos, input.length)] === 1
   const chunks: string[] = []
 
   let start = 0
@@ -72,7 +86,8 @@ export function chunk(text: string, max: number = MAX_CHUNK_SIZE): string[] {
     const sentence = splitMatches(input, start, end, /[.!?]\s+/g)
     const space = input.lastIndexOf(" ", end)
 
-    let cut = start + budget
+    const budgetCut = start + budget
+    let cut = budgetCut
     let found = false
     for (const candidate of [paragraph, line, sentence, space]) {
       if (candidate > start && candidate <= end) {
@@ -81,17 +96,21 @@ export function chunk(text: string, max: number = MAX_CHUNK_SIZE): string[] {
         break
       }
     }
-    if (!found) cut = start + budget
+    if (!found) cut = budgetCut
 
-    if (isForbidden(cut, fences) || isMaybeForbiddenBacktick(input, cut)) {
+    if (isSplitForbidden(cut)) {
+      // Scan back at most 512 chars — O(1) per cut, avoids O(n·budget) stalls
+      // on large code responses. If nothing allowed nearby (e.g. deep inside a
+      // long fence), fall back to the full-budget cut instead of a tiny split.
       let adjusted = -1
-      for (let pos = cut - 1; pos > start; pos--) {
-        if (!isForbidden(pos, fences) && !isMaybeForbiddenBacktick(input, pos)) {
+      const floor = Math.max(start + 1, cut - 512)
+      for (let pos = cut - 1; pos >= floor; pos--) {
+        if (!isSplitForbidden(pos)) {
           adjusted = pos
           break
         }
       }
-      if (adjusted > start) cut = adjusted
+      cut = adjusted > start ? adjusted : budgetCut
     }
 
     if (cut <= start) cut = start + budget

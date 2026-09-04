@@ -2,7 +2,7 @@
 import { format } from "node:util"
 import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync } from "node:fs"
 import { execFileSync, spawn } from "node:child_process"
-import { join } from "node:path"
+import { join, normalize, resolve } from "node:path"
 import { authPath, configPath, defaultConfig, ensureDataDir, loadConfig, writeConfig } from "./config.js"
 import type { WacConfig } from "./config.js"
 import { WhatsAppClient, hasCredentials, type MessageEvent } from "./baileys.js"
@@ -74,6 +74,26 @@ function wacLabel(sessionId?: string, model?: string): string {
 }
 
 const chatQueues = new Map<string, Promise<void>>()
+class PromptTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`opencode prompt timed out after ${Math.round(timeoutMs / 1000)} seconds`)
+    this.name = "PromptTimeoutError"
+  }
+}
+
+async function promptWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new PromptTimeoutError(timeoutMs)), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
 
 function enqueue<T>(chatJid: string, fn: () => Promise<T>): Promise<T> {
   const prev = chatQueues.get(chatJid) ?? Promise.resolve()
@@ -117,6 +137,12 @@ async function processMessage(
   event: MessageEvent,
 ) {
   const { chatJid, text, media } = event
+  if (!text.trim() && !media && event.mediaError) {
+    const why = event.mediaError === "too-large" ? "Media was too large (>25MB) to download." : "Couldn't download that media."
+    const s = router.chatSession(chatJid)
+    await sendChunked(whatsapp, chatJid, `(error) ${why} Try a smaller file or add a caption.`, wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
+    return
+  }
   await whatsapp.startTyping(chatJid)
   try {
     if (text.trim() && isLocalCommand(text)) {
@@ -150,7 +176,12 @@ async function processMessage(
     console.error(`handler error: ${format(error)}`)
     const s = router.chatSession(chatJid)
     const label = wacLabel(s?.sessionId, s?.model ?? config.defaultModel)
-    const msg = error instanceof Error ? error.message : String(error)
+    const msg =
+      error instanceof PromptTimeoutError
+        ? "Still working in the background past the timeout — nothing was cancelled. Ask for status, or send /stop to cancel."
+        : error instanceof Error
+          ? error.message
+          : String(error)
     await sendChunked(whatsapp, chatJid, `(error) ${msg}`, label)
   } finally {
     await whatsapp.stopTyping(chatJid)
@@ -171,23 +202,19 @@ async function promptWithRetry(
     router.ensureModel(chatJid, effectiveModel)
     record.model = effectiveModel
   }
-  const attempts = 3
-  let lastError: unknown
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await opencode.prompt(record.sessionId, text, effectiveModel, config.systemPrompt, media)
-    } catch (error) {
-      lastError = error
-      if (attempt < attempts) {
-        await new Promise((resolve) => setTimeout(resolve, 1500 * attempt))
-      }
-    }
-  }
-  throw lastError
+  // Single attempt, never retry a prompt: opencode may already have executed
+  // tools server-side, so re-issuing duplicates side effects. On timeout the
+  // server-side work is left running (never auto-abort); the user can /stop it.
+  return await promptWithTimeout(
+    opencode.prompt(record.sessionId, text, effectiveModel, config.systemPrompt, media),
+    config.promptTimeoutMs,
+  )
 }
 
 function toJid(number: string): string {
-  return number.includes("@") ? number : `${number.replace(/^\+/, "")}@s.whatsapp.net`
+  if (number.includes("@")) return number
+  const digits = number.replace(/^\+/, "").replace(/[\s\-().]/g, "")
+  return `${digits}@s.whatsapp.net`
 }
 
 const OUTBOX_POLL_MS = 15_000
@@ -233,10 +260,11 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig) {
           ageMin > 5
             ? `(queued ${new Date(msg.created as number).toLocaleString()})\n\n${msg.text}`
             : msg.text
-        const to = msg.to ? msg.to : toJid(config.allowlist[0])
-        if (!allowed.has(to) || !to.endsWith("@s.whatsapp.net")) throw new Error("outbox recipient is not allowlisted")
-        if (msg.text.length > 100_000) throw new Error("outbox message is too large")
-        await whatsapp.sendText(to, body)
+        const to = msg.to ? toJid(msg.to) : toJid(config.allowlist[0])
+        if (!allowed.has(to) || !(to.endsWith("@s.whatsapp.net") || to.endsWith("@lid"))) {
+          throw new Error("outbox recipient is not allowlisted")
+        }
+        await sendChunked(whatsapp, to, body)
         unlinkSync(path)
         failures.delete(file)
         console.log(`outbox sent ${file}`)
@@ -259,6 +287,7 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig) {
   setInterval(() => {
     void poll()
   }, OUTBOX_POLL_MS)
+  void poll() // deliver immediately on boot, don't wait a full interval
 }
 
 async function sendWelcome(whatsapp: WhatsAppClient, config: WacConfig) {
@@ -329,7 +358,9 @@ async function cmdServe() {
     console.log(line)
     if (status === "open" && !welcomeSent) {
       welcomeSent = true
-      void sendWelcome(whatsapp, config)
+      if (config.welcomeOnConnect !== false && process.env.WAC_WELCOME !== "0") {
+        void sendWelcome(whatsapp, config)
+      }
     }
     void qr
   }
@@ -366,10 +397,21 @@ function ensureOpenCodeServer(config: WacConfig) {
   try {
     const url = new URL(config.opencodeBaseUrl)
     const port = url.port || "8080"
-    const opencodeBin = process.env.OPENCODE_BIN || join(process.env.HOME ?? "", ".opencode/bin/opencode")
+    const home = process.env.HOME ?? ""
+    const rawBin = process.env.OPENCODE_BIN || (home ? `${home}/.opencode/bin/opencode` : "")
+    if (!rawBin) throw new Error("no opencode binary path available")
+    const bin = normalize(resolve(rawBin))
+    const allowedPrefixes = [
+      home ? normalize(resolve(home, ".opencode")) : "",
+      "/usr/local/bin",
+      "/opt/homebrew/bin",
+      normalize(resolve(process.cwd(), "node_modules/.bin")),
+    ].filter(Boolean)
+    const ok = allowedPrefixes.some((p) => bin === p || bin.startsWith(`${p}/`)) || bin.endsWith("/bin/opencode")
+    if (!ok) throw new Error(`refusing to spawn opencode from untrusted OPENCODE_BIN=${rawBin}`)
     const env = { ...process.env }
     if (config.opencodePassword) env.OPENCODE_SERVER_PASSWORD = config.opencodePassword
-    const child = spawn(opencodeBin, ["serve", "--hostname", "127.0.0.1", "--port", port], {
+    const child = spawn(bin, ["serve", "--hostname", "127.0.0.1", "--port", port], {
       stdio: "ignore",
       detached: true,
       env,

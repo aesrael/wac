@@ -43,28 +43,19 @@ export class Store {
 
   set(chatJid: string, session: ChatSession) {
     this.data.chats[chatJid] = session
-    this.scheduleSave()
+    // Flush synchronously: the store is tiny, and a SIGKILLed twin (see
+    // killStaleInstances) would otherwise lose mappings saved <50ms ago.
+    this.flush()
   }
 
   delete(chatJid: string) {
     if (!this.data.chats[chatJid]) return
     delete this.data.chats[chatJid]
-    this.scheduleSave()
+    this.flush()
   }
 
   all(): Record<string, ChatSession> {
     return this.data.chats
-  }
-
-  resolveChatsForSession(sessionId: string): string[] {
-    return Object.entries(this.data.chats)
-      .filter(([, s]) => s.sessionId === sessionId)
-      .map(([chat]) => chat)
-  }
-
-  private scheduleSave() {
-    if (this.saveTimer) clearTimeout(this.saveTimer)
-    this.saveTimer = setTimeout(() => this.flush(), 50)
   }
 
   flush() {
