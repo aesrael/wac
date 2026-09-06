@@ -74,10 +74,6 @@ function wacLabel(sessionId?: string, model?: string): string {
 }
 
 const chatQueues = new Map<string, Promise<void>>()
-// chatJid -> trimmed prompt text currently being processed.
-// A repeat of the same text while its twin runs is a retry-tap,
-// not new work — dropped in handleIncoming instead of queued.
-const inFlight = new Map<string, string>()
 class PromptTimeoutError extends Error {
   constructor(timeoutMs: number) {
     super(`opencode prompt timed out after ${Math.round(timeoutMs / 1000)} seconds`)
@@ -87,13 +83,6 @@ class PromptTimeoutError extends Error {
 
 async function promptWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
-  // The race loser still settles later. Without handlers its rejection
-  // is unhandled and crashes the daemon (launchd restarts it, queued
-  // work dies with it). Settle the timer either way, up front.
-  void promise.then(
-    () => { if (timer) clearTimeout(timer) },
-    () => { if (timer) clearTimeout(timer) },
-  )
   try {
     return await Promise.race([
       promise,
@@ -133,33 +122,6 @@ async function handleIncoming(
     return // non-allowlisted: silent drop, never enqueued
   }
 
-  const trimmed = text.trim()
-  if (trimmed && !trimmed.startsWith("/") && !event.media && inFlight.get(chatJid) === trimmed) {
-    console.log(`dedupe: dropped repeat prompt in ${chatJid}`)
-    return
-  }
-
-  if (event.fromHistory) {
-    console.log(`backfill: recovered message in ${chatJid}`)
-  }
-
-  // Native commands jump the queue: the agent keeps working in the
-  // background, but local commands answer immediately and never wait on it.
-  // Failures reply as (error) text here — never fall through to the model.
-  if (trimmed && isLocalCommand(trimmed)) {
-    try {
-      const result = await handleCommand(router, opencode, config, chatJid, trimmed)
-      if (result.handled) {
-        const s = router.chatSession(chatJid)
-        await sendChunked(whatsapp, chatJid, result.text, wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
-      }
-    } catch (error) {
-      const s = router.chatSession(chatJid)
-      await sendChunked(whatsapp, chatJid, `(error) ${(error as Error).message}`, wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
-    }
-    return
-  }
-
   await enqueue(chatJid, () => processMessage(whatsapp, opencode, router, config, event))
 }
 
@@ -182,16 +144,6 @@ async function processMessage(
     return
   }
   await whatsapp.startTyping(chatJid)
-  // Heartbeat: re-assert typing presence while long work runs.
-  // Presence only — no bubble, no buzz, nothing stored. The single
-  // ping above expires server-side after ~30s, which is what made
-  // long runs look dead. Interval dies with this task in `finally`.
-  const pulse = setInterval(
-    () => {
-      void whatsapp.startTyping(chatJid)
-    },
-    Math.min(60_000, Math.max(10_000, config.typingPulseMs)),
-  )
   try {
     if (text.trim() && isLocalCommand(text)) {
       const result = await handleCommand(router, opencode, config, chatJid, text)
@@ -214,7 +166,6 @@ async function processMessage(
       }
     }
 
-    inFlight.set(chatJid, text.trim())
     const result = await promptWithRetry(opencode, router, chatJid, record, text, config, media)
     if (result.isEmpty || result.error) {
       await sendChunked(whatsapp, chatJid, `(error) ${result.error ?? "model returned nothing readable — wrong or unpaid model?"}`, wacLabel(record.sessionId, record.model ?? config.defaultModel))
@@ -243,8 +194,6 @@ async function processMessage(
     }
     await sendChunked(whatsapp, chatJid, `(error) ${msg}`, label)
   } finally {
-    if (inFlight.get(chatJid) === text.trim()) inFlight.delete(chatJid)
-    clearInterval(pulse)
     await whatsapp.stopTyping(chatJid)
   }
 }
@@ -544,13 +493,6 @@ async function cmdStatus() {
   }
   if (!opencodeOk) process.exitCode = 1
 }
-
-// Safety net: a late-settling promise must never take the daemon down
-// (and every queued message with it). Log and survive; genuine crashes
-// still exit via uncaught exceptions and launchd restarts.
-process.on("unhandledRejection", (reason) => {
-  console.error(`unhandled rejection (surviving): ${format(reason)}`)
-})
 
 async function main() {
   const [command] = process.argv.slice(2)

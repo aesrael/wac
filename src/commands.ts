@@ -1,5 +1,4 @@
 import type { WacConfig } from "./config.js"
-import { execSync } from "node:child_process"
 import { OpencodeClientFacade } from "./serve-client.js"
 import type { SessionRouter } from "./sessions.js"
 import type { ChatSession } from "./store.js"
@@ -8,7 +7,7 @@ export type CommandResult =
   | { handled: true; text: string }
   | { handled: false; text?: undefined }
 
-const LOCAL_COMMANDS = new Set(["/help", "/status", "/sessions", "/session", "/new", "/clear", "/fork", "/stop", "/model", "/models", "/compact", "/current", "/delete", "/restart"])
+const LOCAL_COMMANDS = new Set(["/help", "/status", "/sessions", "/session", "/new", "/clear", "/fork", "/stop", "/model", "/models", "/compact", "/current", "/delete"])
 
 export function isLocalCommand(text: string): boolean {
   const first = text.split(/\s+/, 1)[0]?.toLowerCase()
@@ -77,7 +76,6 @@ export function helpText(): string {
     "  /compact    compact the current session",
     "  /current    show the current session for this chat",
     "  /delete     delete the current session for this chat",
-  "  /restart    restart the wac daemon (supervisor-guarded; opencode untouched)",
     "  /model <provider/model>  set model for this chat",
     "  /models [n] list available models (default 20)",
     "  /status     connection status",
@@ -221,22 +219,6 @@ export async function handleCommand(
       const record = await router.deleteChatSession(chatJid)
       if (!record) return { handled: true, text: "No session for this chat yet." }
       return { handled: true, text: `Deleted session ${record.sessionId}. Next message will start a fresh one.` }
-    }
-
-    case "/restart": {
-      // Supervisor-guarded: only exit when launchd will bring us back.
-      // Refuse instead of killing the bridge unsupervised. Restarts wac
-      // only — opencode serve and its sessions are untouched.
-      try {
-        const list = execSync("launchctl list", { timeout: 5000 }).toString()
-        if (!/com\.user\.wac/.test(list)) {
-          return { handled: true, text: "(error) no supervisor found — not restarting (bridge would stay down). Restart manually." }
-        }
-      } catch {
-        return { handled: true, text: "(error) could not verify supervisor — not restarting. Restart manually." }
-      }
-      setTimeout(() => process.exit(0), 500)
-      return { handled: true, text: "Restarting wac… back in seconds. Opencode sessions untouched." }
     }
 
     case "/fork": {
