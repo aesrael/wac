@@ -224,16 +224,13 @@ export async function handleCommand(
     }
 
     case "/restart": {
-      // Supervisor-guarded: only exit when something will bring us back.
-      // The label is configurable (WAC_SUPERVISOR_LABEL) so this isn't tied
-      // to one supervisor setup by name; default matches our plist. Refuse
-      // instead of killing the bridge unsupervised. Restarts wac only —
-      // opencode serve and its sessions are untouched.
-      const label = process.env.WAC_SUPERVISOR_LABEL ?? "com.user.wac"
+      // Supervisor-guarded: only exit when launchd will bring us back.
+      // Refuse instead of killing the bridge unsupervised. Restarts wac
+      // only — opencode serve and its sessions are untouched.
       try {
         const list = execSync("launchctl list", { timeout: 5000 }).toString()
-        if (!list.includes(label)) {
-          return { handled: true, text: `(error) supervisor ${label} not found — not restarting (bridge would stay down). Restart manually.` }
+        if (!/com\.user\.wac/.test(list)) {
+          return { handled: true, text: "(error) no supervisor found — not restarting (bridge would stay down). Restart manually." }
         }
       } catch {
         return { handled: true, text: "(error) could not verify supervisor — not restarting. Restart manually." }
