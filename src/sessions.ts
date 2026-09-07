@@ -5,7 +5,6 @@ export class SessionRouter {
   constructor(
     private readonly client: OpencodeClientFacade,
     private readonly store: Store,
-    private readonly defaultModel?: string,
   ) {}
 
   async resolve(chatJid: string): Promise<ChatSession> {
@@ -18,17 +17,20 @@ export class SessionRouter {
         /* mapped session is gone server-side (e.g. opencode serve restarted and
            lost its sessions); fall through and recreate a fresh one */
       }
-      return await this.createForChat(chatJid, existing.title, existing.model ?? this.defaultModel)
+      // Never stamp the global default into the record: it must stay live.
+      return await this.createForChat(chatJid, existing.title, existing.model)
     }
 
-    const session = await this.createForChat(chatJid, undefined, this.defaultModel)
+    const session = await this.createForChat(chatJid, undefined, undefined)
     return session
   }
 
   async createForChat(chatJid: string, title?: string, model?: string): Promise<ChatSession> {
     const effectiveTitle = title && title.trim() ? title.trim() : undefined
     const session = await this.client.createSession(effectiveTitle)
-    const effectiveModel = model ?? this.store.get(chatJid)?.model ?? this.defaultModel
+    // Explicit model only (per-chat /model or preserved mapping). The global
+    // default resolves at prompt time so /model default applies immediately.
+    const effectiveModel = model ?? this.store.get(chatJid)?.model
     const record: ChatSession = {
       sessionId: session.id,
       title: title ?? session.title ?? "",
@@ -60,7 +62,8 @@ export class SessionRouter {
     const session = await this.client.getSession(sessionId)
     if (!session) return undefined
     const previous = this.store.get(chatJid)
-    const effectiveModel = previous?.model ?? this.defaultModel
+    // Preserve an explicit per-chat model only; the global default stays live.
+    const effectiveModel = previous?.model
     const record: ChatSession = {
       sessionId,
       title: session.title || sessionId,
@@ -93,15 +96,6 @@ export class SessionRouter {
     return existing
   }
 
-  ensureModel(chatJid: string, fallback?: string): ChatSession | undefined {
-    const existing = this.store.get(chatJid)
-    if (!existing || existing.model || !fallback) return existing
-    existing.model = fallback
-    existing.updatedAt = Date.now()
-    this.store.set(chatJid, existing)
-    return existing
-  }
-
   chatSession(chatJid: string): ChatSession | undefined {
     return this.store.get(chatJid)
   }
@@ -116,16 +110,19 @@ export class SessionRouter {
     return (await this.listSessions()).filter((s) => s.sessionId === current.sessionId)
   }
 
-  async deleteChatSession(chatJid: string): Promise<ChatSession | undefined> {
+  async deleteChatSession(chatJid: string): Promise<{ record: ChatSession; serverDeleted: boolean } | undefined> {
     const record = this.store.get(chatJid)
     if (!record) return undefined
+    let serverDeleted = true
     try {
       await this.client.deleteSession(record.sessionId)
     } catch {
-      /* session may already be gone server-side; still clear the mapping */
+      // Session may already be gone server-side; still clear the mapping,
+      // but report it so /sessions output is unambiguous.
+      serverDeleted = false
     }
     this.store.delete(chatJid)
-    return record
+    return { record, serverDeleted }
   }
 
   async forkChat(chatJid: string, messageID?: string): Promise<ChatSession | undefined> {

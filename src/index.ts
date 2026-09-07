@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { format } from "node:util"
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, unlinkSync, existsSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, unlinkSync, existsSync, openSync } from "node:fs"
 import { execFileSync, spawn } from "node:child_process"
 import { join, normalize, resolve, dirname, basename } from "node:path"
 import { authPath, configPath, defaultConfig, ensureDataDir, loadConfig, writeConfig } from "./config.js"
@@ -112,9 +112,25 @@ function enqueue<T>(chatJid: string, fn: () => Promise<T>): Promise<T> {
   return next
 }
 
-// --- /restart: detached-successor handover (no supervisor) ---
+// --- /restart: graceful handover, deployment-agnostic ---
+//
+// Two modes, same code on every OS. The deployment declares itself —
+// wac never names a supervisor:
+// - standalone (default): spawn a detached successor carrying our PID,
+//   reply, exit. The successor polls our death, then takes over.
+// - supervised (WAC_SUPERVISED=1, set by the launchd plist / systemd
+//   unit): reply, mark the restart, exit nonzero so the supervisor
+//   relaunches us. Nothing is ever spawned past the supervisor.
 
 let restartArmed = false
+
+/** True when running under a supervisor that restarts us on nonzero exit. */
+function supervised(): boolean {
+  return process.env.WAC_SUPERVISED === "1"
+}
+
+/** Nonzero exit asks a supervisor (launchd KeepAlive, systemd on-failure) to relaunch. */
+const RESTART_EXIT_CODE = 2
 
 function projectRoot(): string {
   const script = process.argv[1] ?? ""
@@ -164,12 +180,31 @@ function successorScript(): string {
   return process.argv[1] ?? dist
 }
 
-function spawnSuccessor(oldPid: number): void {
-  const env = { ...process.env, WAC_WELCOME: "0", WAC_TAKEOVER_FROM: String(oldPid) }
+function successorLog(dataDir: string, name: string): number | "ignore" {
+  try {
+    const dir = join(dataDir, "logs")
+    mkdirSync(dir, { recursive: true })
+    return openSync(join(dir, name), "a")
+  } catch {
+    return "ignore"
+  }
+}
+
+function spawnSuccessor(oldPid: number, dataDir: string): void {
+  const env: NodeJS.ProcessEnv = { ...process.env, WAC_TAKEOVER_FROM: String(oldPid) }
+  // WAC_WELCOME is strictly opt-out: never inherit a suppression from an
+  // ancestor generation — every handover announces itself.
+  delete env.WAC_WELCOME
+  // Successor logs to the same files so handovers stay observable.
+  const stdio: ["ignore", number | "ignore", number | "ignore"] = [
+    "ignore",
+    successorLog(dataDir, "wac.log"),
+    successorLog(dataDir, "wac.err.log"),
+  ]
   const child = spawn(process.execPath, [successorScript(), "serve", "--takeover-from", String(oldPid)], {
     cwd: projectRoot(),
     detached: true,
-    stdio: "ignore",
+    stdio,
     env,
   })
   child.unref()
@@ -202,34 +237,42 @@ function isPidAlive(pid: number): boolean {
 }
 
 /**
- * tsc gate → spawn detached successor carrying our PID.
- * Returns text to reply (error text on failure, undefined on success
- * meaning the caller should send its own "Restarting…" reply).
+ * tsc gate → arm the handover. Supervised: nothing to spawn, the exit
+ * below is the whole request. Standalone: spawn a detached successor.
+ * Returns error text on failure, otherwise the mode for the exit step.
  */
-function attemptRestart(): string | undefined {
-  if (restartArmed) return undefined // duplicate tap while exiting: still exit, one successor only
+function attemptRestart(dataDir: string): { error?: string; supervised?: boolean } {
+  if (restartArmed) return { supervised: supervised() } // duplicate tap while exiting
   const gate = runTscGate()
-  if (!gate.ok) return `(error) not restarting — build fails:\n${gate.error}`
+  if (!gate.ok) return { error: `(error) not restarting — build fails:\n${gate.error}` }
+  if (supervised()) {
+    restartArmed = true
+    return { supervised: true }
+  }
   try {
-    spawnSuccessor(process.pid)
+    spawnSuccessor(process.pid, dataDir)
   } catch (error) {
-    return `(error) not restarting — could not spawn successor (${(error as Error).message})`
+    return { error: `(error) not restarting — could not spawn successor (${(error as Error).message})` }
   }
   restartArmed = true
-  return undefined
+  return { supervised: false }
 }
 
-function scheduleRestartExit(whatsapp: WhatsAppClient, store: Store) {
+function scheduleRestartExit(whatsapp: WhatsAppClient, store: Store, config: WacConfig, exitCode: number) {
   // Reply is flushed by the caller first; give Baileys ~500ms to send,
   // then disconnect WA (opencode serve stays up, untouched) and exit.
-  // The successor polls our death, then takes over the pidfile + socket.
-  // New socket kicks the old one off WhatsApp — safe direction, we are gone.
+  // Standalone: the successor polls our death, then takes over the
+  // pidfile + socket (new socket kicks the old one — safe direction).
+  // Supervised: the nonzero exit is the relaunch request.
   setTimeout(() => {
     try {
       store.flush()
     } catch { /* best effort */ }
     void whatsapp.shutdown()
-    setTimeout(() => process.exit(0), 1500)
+    console.log(`restarting wac (exit ${exitCode})`)
+    // Do not wait for Baileys' close event. It can be delayed or never arrive
+    // on a half-dead socket; the supervisor must receive the exit code.
+    process.exit(exitCode)
   }, 500)
 }
 
@@ -263,11 +306,11 @@ async function handleIncoming(
       const result = await handleCommand(router, opencode, config, chatJid, trimmed)
       if (result.handled) {
         if (result.restart) {
-          const err = attemptRestart()
+          const { error, supervised: sup } = attemptRestart(config.dataDir)
           const s = router.chatSession(chatJid)
           const label = wacLabel(s?.sessionId, s?.model ?? config.defaultModel)
-          await sendChunked(whatsapp, chatJid, err ?? result.text, label)
-          if (!err) scheduleRestartExit(whatsapp, store)
+          await sendChunked(whatsapp, chatJid, error ?? result.text, label)
+          if (!error) scheduleRestartExit(whatsapp, store, config, sup ? RESTART_EXIT_CODE : 0)
           return
         }
         const s = router.chatSession(chatJid)
@@ -308,11 +351,11 @@ async function processMessage(
       const result = await handleCommand(router, opencode, config, chatJid, text)
       if (result.handled) {
         if (result.restart) {
-          const err = attemptRestart()
+          const { error, supervised: sup } = attemptRestart(config.dataDir)
           const s = router.chatSession(chatJid)
           const label = wacLabel(s?.sessionId, s?.model ?? config.defaultModel)
-          await sendChunked(whatsapp, chatJid, err ?? result.text, label)
-          if (!err) scheduleRestartExit(whatsapp, store)
+          await sendChunked(whatsapp, chatJid, error ?? result.text, label)
+          if (!error) scheduleRestartExit(whatsapp, store, config, sup ? RESTART_EXIT_CODE : 0)
           return
         }
         const s = router.chatSession(chatJid)
@@ -379,10 +422,8 @@ async function promptWithRetry(
   media?: { buffer: Buffer; mime: string; filename?: string },
 ) {
   const effectiveModel = record.model ?? config.defaultModel
-  if (!record.model && effectiveModel) {
-    router.ensureModel(chatJid, effectiveModel)
-    record.model = effectiveModel
-  }
+  // No stamping: the record keeps explicit models only, so the global
+  // default stays live for every prompt.
   // Single attempt, never retry a prompt: opencode may already have executed
   // tools server-side, so re-issuing duplicates side effects. On timeout the
   // fetch is aborted (socket dies for real) and the caller aborts the
@@ -476,18 +517,21 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig) {
   void poll() // deliver immediately on boot, don't wait a full interval
 }
 
-async function sendWelcome(whatsapp: WhatsAppClient, config: WacConfig) {
+async function sendWelcome(whatsapp: WhatsAppClient, config: WacConfig): Promise<boolean> {
   const message = [
     `☘️ wac is online — send /help for commands, or just message me.`,
   ].join("\n")
+  let sent = 0
   for (const number of config.allowlist) {
     try {
       await whatsapp.sendText(toJid(number), message)
       console.log(`sent welcome to ${number}`)
+      sent++
     } catch (error) {
       console.error(`failed to send welcome to ${number}: ${format(error)}`)
     }
   }
+  return sent > 0
 }
 
 function pidPath(dataDir: string): string {
@@ -540,7 +584,10 @@ async function cmdServe(takeoverFrom?: number) {
     }
     console.log(`takeover: old PID ${takeoverFrom} gone — taking over`)
   }
-  acquireLock(config.dataDir)
+  // In supervised mode launchd/systemd owns process uniqueness. Avoid a
+  // pidfile entirely: an exiting generation can otherwise race a replacement
+  // and remove the replacement's pidfile. Standalone mode keeps the guard.
+  if (!supervised()) acquireLock(config.dataDir)
   if (config.allowlist.length === 0) {
     fatal(`config "allowlist" is empty — add your WhatsApp number to ${configPath(config.dataDir)}`)
   }
@@ -551,10 +598,13 @@ async function cmdServe(takeoverFrom?: number) {
     username: config.opencodeUsername,
     password: config.opencodePassword,
     directory: config.opencodeDirectory,
+    requestTimeoutMs: config.promptTimeoutMs,
   })
-  const router = new SessionRouter(opencode, store, config.defaultModel)
+  const router = new SessionRouter(opencode, store)
   const whatsapp = new WhatsAppClient(config, authPath(config.dataDir))
   let welcomeSent = false
+  let welcomeTimer: ReturnType<typeof setTimeout> | undefined
+  let shuttingDown = false
   const opencodeChildren = new Set<number>()
 
   whatsapp.statusListener = (status, qr) => {
@@ -565,11 +615,29 @@ async function cmdServe(takeoverFrom?: number) {
           ? "WhatsApp: needs QR — scan with your phone"
           : `WhatsApp: ${status}`
     console.log(line)
-    if (status === "open" && !welcomeSent) {
-      welcomeSent = true
-      if (config.welcomeOnConnect !== false && process.env.WAC_WELCOME !== "0") {
-        void sendWelcome(whatsapp, config)
-      }
+    if (status === "close") {
+      if (welcomeTimer) clearTimeout(welcomeTimer)
+      welcomeTimer = undefined
+    }
+    if (status === "open" && !welcomeSent && !welcomeTimer && config.welcomeOnConnect !== false && process.env.WAC_WELCOME !== "0") {
+      // Baileys reports `open` before the linked-device send path is fully
+      // settled. Retry on failure, but never send twice after success.
+      welcomeTimer = setTimeout(() => {
+        welcomeTimer = undefined
+        if (whatsapp.statusText !== "open") return
+        void sendWelcome(whatsapp, config).then((ok) => {
+          if (ok) {
+            welcomeSent = true
+          } else if (whatsapp.statusText === "open") {
+            // A request can be accepted locally and still fail during sync.
+            // Leave the flag unset so the next open/retry can try again.
+            welcomeTimer = setTimeout(() => {
+              welcomeTimer = undefined
+              if (whatsapp.statusText === "open") void sendWelcome(whatsapp, config).then((sent) => { welcomeSent = sent })
+            }, 5_000)
+          }
+        })
+      }, 5_000)
     }
     void qr
   }
@@ -583,6 +651,8 @@ async function cmdServe(takeoverFrom?: number) {
   }
 
   const shutdown = async () => {
+    if (shuttingDown) return
+    shuttingDown = true
     console.log("shutting down…")
     await whatsapp.shutdown()
     store.flush()

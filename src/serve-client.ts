@@ -1,11 +1,13 @@
 import { createOpencodeClient, OpencodeClient } from "@opencode-ai/sdk"
 import type { AssistantMessage, Part, Session } from "@opencode-ai/sdk"
+import { Agent, fetch as undiciFetch } from "undici"
 
 export type OpenCodeAuth = {
   baseUrl: string
   username: string
   password?: string
   directory: string
+  requestTimeoutMs?: number
 }
 
 function data<T>(result: { data: T | undefined; error?: unknown }): T {
@@ -47,10 +49,31 @@ export function makeClient(auth: OpenCodeAuth): OpencodeClient {
   const url = new URL(auth.baseUrl)
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1"
   if (!loopback && url.protocol !== "https:") throw new Error("opencodeBaseUrl must use HTTPS unless it is loopback")
+  const transportTimeoutMs = (auth.requestTimeoutMs ?? 300_000) + 30_000
+  const dispatcher = new Agent({
+    headersTimeout: transportTimeoutMs,
+    bodyTimeout: transportTimeoutMs,
+  })
+  const transportFetch = (input: any, init?: any) => {
+    if (typeof input === "string" || input instanceof URL) {
+      return undiciFetch(input, { ...(init ?? {}), dispatcher })
+    }
+    const req = input as Request
+    return undiciFetch(req.url, {
+      method: req.method,
+      headers: req.headers,
+      body: (req.method === "GET" || req.method === "HEAD" ? undefined : (req as any).body ?? undefined) as any,
+      signal: (req.signal ?? init?.signal) as any,
+      redirect: (req as any).redirect,
+      dispatcher,
+      ...(req.method === "GET" || req.method === "HEAD" ? {} : { duplex: "half" as const }),
+    })
+  }
   return createOpencodeClient({
     baseUrl: url.toString() as `${string}://${string}`,
     headers: authHeader(auth),
     directory: auth.directory,
+    fetch: transportFetch as typeof fetch,
     throwOnError: true,
   })
 }
@@ -136,6 +159,7 @@ export class OpencodeClientFacade {
     media?: { buffer: Buffer; mime: string; filename?: string } | { buffer: Buffer; mime: string; filename?: string }[],
     signal?: AbortSignal,
   ): Promise<PromptResult> {
+    const startedAt = Date.now()
     const providerID = model?.includes("/") ? model.slice(0, model.indexOf("/")) : undefined
     const modelID = model?.includes("/") ? model.slice(model.indexOf("/") + 1) : undefined
     const mediaList = media ? (Array.isArray(media) ? media : [media]) : []
@@ -159,6 +183,8 @@ export class OpencodeClientFacade {
         ...(signal ? { signal } : {}),
       } as never),
     )
+    const durationMs = Date.now() - startedAt
+    if (durationMs > 5000) console.log(`opencode prompt session=${sessionId} took ${Math.round(durationMs / 1000)}s`)
     return {
       message: result.info,
       text: partsToText(result.parts),

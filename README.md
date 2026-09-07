@@ -75,7 +75,7 @@ DM the bot:
 | `/delete` | delete current session |
 | `/model` | show chat's model |
 | `/model <p/m>` | set model for this chat |
-| `/models [n]` | list models (20 default, 100 max) |
+| `/models [query] [n]` | search/list models (20 default, 100 max) |
 | `/compact` | summarize session |
 | `/stop` | cancel running work |
 | `/restart` | restart wac daemon (opencode untouched) |

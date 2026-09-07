@@ -116,9 +116,7 @@ export class WhatsAppClient {
         setTimeout(() => {
           void this.connect()
         }, delay)
-      } else if (this.stopping) {
-        process.exit(0)
-      } else {
+      } else if (!this.stopping) {
         this.status = "close"
         this.statusListener?.(this.status)
         process.exit(1)
@@ -364,7 +362,9 @@ export class WhatsAppClient {
   async sendText(chatJid: string, text: string): Promise<void> {
     if (!text.trim()) return
     if (!this.socket) throw new Error("WhatsApp socket not connected")
-    const content: AnyMessageContent = { text }
+    // linkPreview: null disables baileys' auto-fetch-on-send (link-preview-js has an
+    // unpatched SSRF via DNS rebinding - GHSA-4gp8-rjrq-ch6q / GHSA-cpjf-6666-r8fx).
+    const content: AnyMessageContent = { text, linkPreview: null }
     const result = await withTimeout("whatsapp send", SEND_TIMEOUT_MS, () => this.socket!.sendMessage(chatJid, content))
     const id = result?.key?.id
     if (id) {
@@ -376,9 +376,11 @@ export class WhatsAppClient {
   async shutdown() {
     this.stopping = true
     try {
-      await this.socket?.end(new Error("wac stopping"))
+      await withTimeout("whatsapp shutdown", 2_000, async () => {
+        await this.socket?.end(new Error("wac stopping"))
+      })
     } catch {
-      /* ignore */
+      /* a dead socket must not block process shutdown */
     }
   }
 }

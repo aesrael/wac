@@ -1,4 +1,5 @@
 import type { WacConfig } from "./config.js"
+import { writeConfig } from "./config.js"
 import { OpencodeClientFacade } from "./serve-client.js"
 import type { SessionRouter } from "./sessions.js"
 import type { ChatSession } from "./store.js"
@@ -78,7 +79,8 @@ export function helpText(): string {
     "  /current    show the current session for this chat",
     "  /delete     delete the current session for this chat",
     "  /model <provider/model>  set model for this chat",
-    "  /models [n] list available models (default 20)",
+    "  /model default <provider/model>  set global default (new chats use it)",
+    "  /models [query] [n] search/list available models (default 20)",
     "  /status     connection status",
     "Anything else is sent to opencode as a prompt.",
   ].join("\n")
@@ -131,7 +133,7 @@ export async function handleCommand(
       if (byIndex) target = byIndex
       const record = await router.switchChat(chatJid, target)
       if (!record) return { handled: true, text: `No session found with id ${args}.` }
-      return { handled: true, text: await sessionInfoText(client, config, record, `*Switched to session \`${record.sessionId}\`*`, false) }
+      return { handled: true, text: await sessionInfoText(client, config, record, `*Switched to session \`${record.sessionId.slice(0, 8)}\`*`, false) }
     }
 
     case "/new":
@@ -139,7 +141,7 @@ export async function handleCommand(
       const record = await router.createForChat(chatJid)
       return {
         handled: true,
-        text: `Started a fresh session (${record.sessionId}). Previous conversation for this chat is kept on the server.`,
+        text: `Started a fresh session (${record.sessionId.slice(0, 8)}). Previous conversation for this chat is kept on the server.`,
       }
     }
 
@@ -150,6 +152,35 @@ export async function handleCommand(
         if (!effective) return { handled: true, text: "Model: (default — none set for this chat)" }
         const suffix = current?.model ? "" : " (default)"
         return { handled: true, text: `Model: ${effective}${suffix}` }
+      }
+      const [head, ...restArgs] = args.split(/\s+/)
+      if (head?.toLowerCase() === "default") {
+        const value = restArgs.join(" ").trim()
+        if (!value) {
+          return {
+            handled: true,
+            text: config.defaultModel
+              ? `Default model: ${config.defaultModel}`
+              : "Default model: (none set)",
+          }
+        }
+        const candidate = value.replace(/\s+/g, "")
+        try {
+          const providers = await client.listProviders()
+          const flat = providers.flatMap((p) => Object.keys(p.models).map((m) => `${p.id}/${m}`))
+          if (flat.length > 0 && !flat.includes(candidate)) {
+            return { handled: true, text: `Unknown model ${value}. Default not set. Use /models to list valid ones.` }
+          }
+        } catch {
+          return { handled: true, text: `(error) opencode unreachable — default not set. Retry when back.` }
+        }
+        config.defaultModel = candidate
+        try {
+          writeConfig(config)
+        } catch (error) {
+          return { handled: true, text: `(error) could not save default model (${(error as Error).message})` }
+        }
+        return { handled: true, text: `Default model now: ${candidate}. New chats use it immediately, no restart needed.` }
       }
       const candidate = args.replace(/\s+/g, "")
       let flat: string[] = []
@@ -171,14 +202,25 @@ export async function handleCommand(
     }
 
     case "/models": {
-      const n = args ? parseInt(args, 10) : 20
-      const limit = Number.isFinite(n) && n > 0 ? Math.min(n, 100) : 20
+      const tokens = args ? args.split(/\s+/) : []
+      let limit = 20
+      const queryParts: string[] = []
+      for (const t of tokens) {
+        const num = parseInt(t, 10)
+        if (String(num) === t && Number.isFinite(num) && num > 0) limit = Math.min(num, 100)
+        else queryParts.push(t)
+      }
+      const query = queryParts.join(" ").toLowerCase()
       const providers = await client.listProviders()
-      const flat = providers.flatMap((p) => Object.keys(p.models).map((m) => `${p.id}/${m}`)).sort()
-      if (flat.length === 0) return { handled: true, text: "No models returned by opencode." }
+      const all = providers.flatMap((p) => Object.keys(p.models).map((m) => `${p.id}/${m}`)).sort()
+      if (all.length === 0) return { handled: true, text: "No models returned by opencode." }
+      const flat = query ? all.filter((m) => m.toLowerCase().includes(query)) : all
+      if (flat.length === 0) return { handled: true, text: `No models match "${queryParts.join(" ")}".` }
       const shown = flat.slice(0, limit)
-      const more = flat.length > limit ? `\n… and ${flat.length - limit} more (use /models ${flat.length} to see all)` : ""
-      return { handled: true, text: `Models (${shown.length}/${flat.length}):\n` + shown.map((m) => `• ${m}`).join("\n") + more }
+      const scope = query ? ` matching "${queryParts.join(" ")}"` : ""
+      const hint = query ? `${queryParts.join(" ")} ` : ""
+      const more = flat.length > limit ? `\n… and ${flat.length - limit} more (use /models ${hint}${flat.length} to see all)` : ""
+      return { handled: true, text: `Models (${shown.length}/${flat.length}${scope}):\n` + shown.map((m) => `• ${m}`).join("\n") + more }
     }
 
     case "/compact": {
@@ -212,14 +254,48 @@ export async function handleCommand(
         if (cur?.sessionId !== target && !confirm) {
           return { handled: true, text: `That session (${target.slice(0, 8)}) is not this chat's. Resend as \`/delete ${targetArg} confirm\` to delete it.` }
         }
-        await client.deleteSession(target)
-        // if it was this chat's session, clear the mapping too
-        if (cur?.sessionId === target) await router.deleteChatSession(chatJid)
-        return { handled: true, text: `Deleted session ${target.slice(0, 8)}. Next message will start a fresh one.` }
+        let serverDeleted = true
+        try {
+          await client.deleteSession(target)
+        } catch {
+          serverDeleted = false
+        }
+        // if it was this chat's session, clear the mapping and eagerly start a
+        // fresh one, so the reply below is always true (lazy "next message
+        // will..." breaks when opencode is unreachable at that moment).
+        if (cur?.sessionId === target) {
+          const model = cur.model ?? config.defaultModel
+          await router.deleteChatSession(chatJid)
+          if (!serverDeleted) {
+            return { handled: true, text: `Mapping to ${target.slice(0, 8)} cleared, but it may still exist on the server — it can show as unmapped in /sessions.` }
+          }
+          try {
+            const fresh = await router.createForChat(chatJid, undefined, model)
+            return { handled: true, text: `Deleted ${target.slice(0, 8)}, started fresh session ${fresh.sessionId.slice(0, 8)}.` }
+          } catch {
+            return { handled: true, text: `Deleted session ${target.slice(0, 8)}. Could not start a fresh one (opencode unreachable) — your next message will create it.` }
+          }
+        }
+        const tail = serverDeleted
+          ? "It was not this chat's session, so this chat is untouched."
+          : "It may still exist on the server — it can show as unmapped in /sessions."
+        return { handled: true, text: `Deleted session ${target.slice(0, 8)}. ${tail}` }
       }
-      const record = await router.deleteChatSession(chatJid)
-      if (!record) return { handled: true, text: "No session for this chat yet." }
-      return { handled: true, text: `Deleted session ${record.sessionId}. Next message will start a fresh one.` }
+      const res = await router.deleteChatSession(chatJid)
+      if (!res) return { handled: true, text: "No session for this chat yet." }
+      if (!res.serverDeleted) {
+        return { handled: true, text: `Mapping to ${res.record.sessionId.slice(0, 8)} cleared, but it may still exist on the server — it can show as unmapped in /sessions.` }
+      }
+      // Eager fresh session: the old lazy "next message will start a fresh
+      // one" broke whenever opencode was unreachable at that moment.
+      // Per-chat model is preserved explicitly (the mapping is already gone).
+      const model = res.record.model ?? config.defaultModel
+      try {
+        const fresh = await router.createForChat(chatJid, undefined, model)
+        return { handled: true, text: `Deleted ${res.record.sessionId.slice(0, 8)}, started fresh session ${fresh.sessionId.slice(0, 8)}.` }
+      } catch {
+        return { handled: true, text: `Deleted session ${res.record.sessionId.slice(0, 8)}. Could not start a fresh one (opencode unreachable) — your next message will create it.` }
+      }
     }
 
     case "/fork": {
@@ -228,7 +304,7 @@ export async function handleCommand(
       }
       const record = await router.forkChat(chatJid, args || undefined)
       if (!record) return { handled: true, text: "No session for this chat yet; send a message first." }
-      return { handled: true, text: `Forked this chat to session ${record.sessionId}. Previous conversation is kept on the server.` }
+      return { handled: true, text: `Forked this chat to session ${record.sessionId.slice(0, 8)}. Previous conversation is kept on the server.` }
     }
 
     case "/stop": {
