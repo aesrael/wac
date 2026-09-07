@@ -4,10 +4,10 @@ import type { SessionRouter } from "./sessions.js"
 import type { ChatSession } from "./store.js"
 
 export type CommandResult =
-  | { handled: true; text: string }
+  | { handled: true; text: string; restart?: boolean }
   | { handled: false; text?: undefined }
 
-const LOCAL_COMMANDS = new Set(["/help", "/status", "/sessions", "/session", "/new", "/clear", "/fork", "/stop", "/model", "/models", "/compact", "/current", "/delete"])
+const LOCAL_COMMANDS = new Set(["/help", "/status", "/sessions", "/session", "/new", "/clear", "/fork", "/stop", "/model", "/models", "/compact", "/current", "/delete", "/restart"])
 
 export function isLocalCommand(text: string): boolean {
   const first = text.split(/\s+/, 1)[0]?.toLowerCase()
@@ -73,6 +73,7 @@ export function helpText(): string {
     "  /clear      same as /new",
     "  /fork [message-id]  fork this chat's session at a message point (message-id from opencode, not a /sessions number)",
     "  /stop       cancel the currently running work in this chat's session",
+    "  /restart    restart the wac daemon (opencode untouched)",
     "  /compact    compact the current session",
     "  /current    show the current session for this chat",
     "  /delete     delete the current session for this chat",
@@ -239,6 +240,10 @@ export async function handleCommand(
         return { handled: true, text: `Could not cancel: ${(error as Error).message}` }
       }
       return { handled: true, text: `Cancelled running work in ${current.sessionId.slice(0, 8)}. Send a message to continue.` }
+    }
+
+    case "/restart": {
+      return { handled: true, text: "Restarting wac… back in seconds. Opencode sessions untouched.", restart: true }
     }
 
     default:

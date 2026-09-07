@@ -20,6 +20,29 @@ function authHeader(auth: OpenCodeAuth): Record<string, string> | undefined {
   return { Authorization: `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString("base64")}` }
 }
 
+/** Fast-op deadline: instant calls (get/list/command) must never hang the chat queue. */
+export const FAST_OP_MS = 30_000
+/** Abort deadline: cancelling stuck work is best-effort, never blocking. */
+export const ABORT_OP_MS = 15_000
+
+/**
+ * Run an SDK call with a real deadline: the AbortSignal goes into fetch,
+ * so the socket dies instead of lingering after the race rejects.
+ * Slow-but-healthy calls (>5s) are logged for freeze diagnosis.
+ */
+async function withDeadline<T>(label: string, ms: number, fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const ctl = new AbortController()
+  const timer = setTimeout(() => ctl.abort(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms)
+  const start = Date.now()
+  try {
+    return await fn(ctl.signal)
+  } finally {
+    clearTimeout(timer)
+    const dt = Date.now() - start
+    if (dt > 5000) console.log(`opencode ${label} took ${Math.round(dt / 1000)}s`)
+  }
+}
+
 export function makeClient(auth: OpenCodeAuth): OpencodeClient {
   const url = new URL(auth.baseUrl)
   const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1"
@@ -74,7 +97,7 @@ export class OpencodeClientFacade {
 
   async check(): Promise<boolean> {
     try {
-      await this.client.session.list()
+      await withDeadline("check", FAST_OP_MS, (signal) => this.client.session.list({ signal } as never))
       return true
     } catch {
       return false
@@ -82,20 +105,27 @@ export class OpencodeClientFacade {
   }
 
   async listSessions(): Promise<Session[]> {
-    return data(await this.client.session.list())
+    return withDeadline("list", FAST_OP_MS, async (signal) => data(await this.client.session.list({ signal } as never)))
   }
 
   async getSession(sessionId: string): Promise<Session> {
-    return data(await this.client.session.get({ path: { id: sessionId } }))
+    return withDeadline("get", FAST_OP_MS, async (signal) =>
+      data(await this.client.session.get({ path: { id: sessionId }, signal } as never)),
+    )
   }
 
   async abortSession(sessionId: string): Promise<void> {
-    await this.client.session.abort({ path: { id: sessionId } })
+    // Best-effort: a wedged server must not hang the chat queue behind a cancel.
+    await withDeadline("abort", ABORT_OP_MS, async (signal) => {
+      await this.client.session.abort({ path: { id: sessionId }, signal } as never)
+    })
   }
 
   async createSession(title?: string): Promise<Session> {
     const trimmed = title?.trim()
-    return data(await this.client.session.create({ body: trimmed ? { title: trimmed } : {} }))
+    return withDeadline("create", FAST_OP_MS, async (signal) =>
+      data(await this.client.session.create({ body: trimmed ? { title: trimmed } : {}, signal } as never)),
+    )
   }
 
   async prompt(
@@ -104,6 +134,7 @@ export class OpencodeClientFacade {
     model?: string,
     system?: string,
     media?: { buffer: Buffer; mime: string; filename?: string } | { buffer: Buffer; mime: string; filename?: string }[],
+    signal?: AbortSignal,
   ): Promise<PromptResult> {
     const providerID = model?.includes("/") ? model.slice(0, model.indexOf("/")) : undefined
     const modelID = model?.includes("/") ? model.slice(model.indexOf("/") + 1) : undefined
@@ -125,7 +156,8 @@ export class OpencodeClientFacade {
           ...(providerID && modelID ? { model: { providerID, modelID } } : {}),
           ...(system ? { system } : {}),
         },
-      }),
+        ...(signal ? { signal } : {}),
+      } as never),
     )
     return {
       message: result.info,
@@ -137,10 +169,13 @@ export class OpencodeClientFacade {
 
   async command(sessionId: string, command: string, args: string): Promise<string> {
     const result = data(
-      await this.client.session.command({
-        path: { id: sessionId },
-        body: { command, arguments: args },
-      }),
+      await withDeadline("command", FAST_OP_MS, async (signal) =>
+        this.client.session.command({
+          path: { id: sessionId },
+          body: { command, arguments: args },
+          signal,
+        } as never),
+      ),
     )
     if (typeof result === "string") return result
     if (result && typeof result === "object") {
@@ -157,18 +192,23 @@ export class OpencodeClientFacade {
     const providerID = model?.includes("/") ? model.slice(0, model.indexOf("/")) : undefined
     const modelID = model?.includes("/") ? model.slice(model.indexOf("/") + 1) : undefined
     if (!providerID || !modelID) {
-      const info = data(await this.client.session.get({ path: { id: sessionId } }))
+      const info = await this.getSession(sessionId)
       throw new Error(`no per-chat model set for session ${info.id}; use /model <provider/model> first`)
     }
-    await this.client.session.summarize({
-      path: { id: sessionId },
-      body: { providerID, modelID },
+    await withDeadline("summarize", FAST_OP_MS, async (signal) => {
+      await this.client.session.summarize({
+        path: { id: sessionId },
+        body: { providerID, modelID },
+        signal,
+      } as never)
     })
     return true
   }
 
   async listProviders(): Promise<Array<{ id: string; models: Record<string, unknown> }>> {
-    const data = await this.client.config.providers() as unknown as { data?: unknown; error?: unknown }
+    const data = await withDeadline("providers", FAST_OP_MS, async (signal) =>
+      this.client.config.providers({ signal } as never),
+    ) as unknown as { data?: unknown; error?: unknown }
     const raw = (data as { data?: unknown })?.data as unknown
     if (raw && typeof raw === "object") {
       const obj = raw as Record<string, unknown>
@@ -184,7 +224,9 @@ export class OpencodeClientFacade {
         }))
       }
     }
-    const alt = await this.client.provider.list() as unknown as { data?: unknown }
+    const alt = await withDeadline("providers", FAST_OP_MS, async (signal) =>
+      this.client.provider.list({ signal } as never),
+    ) as unknown as { data?: unknown }
     const altData = (alt as { data?: unknown }).data as unknown
     if (altData && typeof altData === "object") {
       const aobj = altData as Record<string, unknown>
@@ -197,16 +239,21 @@ export class OpencodeClientFacade {
   }
 
   async deleteSession(sessionId: string): Promise<void> {
-    await this.client.session.delete({ path: { id: sessionId } })
+    await withDeadline("delete", FAST_OP_MS, async (signal) => {
+      await this.client.session.delete({ path: { id: sessionId }, signal } as never)
+    })
   }
 
   async forkSession(sessionId: string, messageID?: string): Promise<Session> {
     const trimmed = messageID?.trim()
-    return data(
-      await this.client.session.fork({
-        path: { id: sessionId },
-        body: trimmed ? { messageID: trimmed } : {},
-      }),
+    return withDeadline("fork", FAST_OP_MS, async (signal) =>
+      data(
+        await this.client.session.fork({
+          path: { id: sessionId },
+          body: trimmed ? { messageID: trimmed } : {},
+          signal,
+        } as never),
+      ),
     )
   }
 }

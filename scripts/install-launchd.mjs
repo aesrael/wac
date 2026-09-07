@@ -26,7 +26,7 @@ const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <key>Label</key><string>com.user.wac</string>
 <key>ProgramArguments</key><array>${args.map((a) => `<string>${esc(a)}</string>`).join("")}</array>
 <key>WorkingDirectory</key><string>${esc(root)}</string>
-<key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>10</integer>
+<key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>10</integer>
 <key>StandardOutPath</key><string>${esc(join(logs, "wac.log"))}</string>
 <key>StandardErrorPath</key><string>${esc(join(logs, "wac.err.log"))}</string>
 </dict></plist>`

@@ -6,5 +6,6 @@
   "opencodeDirectory": "<project-directory>",
   "defaultModel": "opencode/big-pickle",
   "promptTimeoutMs": 600000,
+  "typingPulseMs": 20000,
   "welcomeOnConnect": true
 }

@@ -10,7 +10,7 @@ export const DEFAULT_SYSTEM_PROMPT =
   "Keep responses concise and scannable: short paragraphs or brief bullet points, no long intros or apologies. " +
   "Use WhatsApp-native formatting where it helps: *bold*, _italic_, `inline code`, ```code blocks```, > quotes, and • bullet lists. " +
   "Avoid # headings and | tables | (render as plain lists instead). For links use plain https:// URLs as tappable links — never wrap URLs in `backticks` or [markdown](url) syntax. " +
-  "Useful user commands: /help (list commands), /sessions (list sessions), /session <id> (switch), /new or /clear (fresh session), /fork [message-id] (fork at message), /stop (cancel running work), /model <provider/model> and /models [n] (model), /compact (summarize), /current (show session), /delete (remove), /status (connection). Explain them when asked. " +
+  "Useful user commands: /help (list commands), /sessions (list sessions), /session <id> (switch), /new or /clear (fresh session), /fork [message-id] (fork at message), /stop (cancel running work), /restart (restart daemon), /model <provider/model> and /models [n] (model), /compact (summarize), /current (show session), /delete (remove), /status (connection). Explain them when asked. " +
   "Work within a reply window stated per request (typically several minutes): prefer complete, correct answers and use the tools you need — don't rush or skip verification to save time. Only if a task genuinely won't fit in the window, send the best result so far plus the single next step to continue in a follow-up. " +
   "Answer directly, then stop."
 
@@ -25,6 +25,7 @@ export type WacConfig = {
   opencodeDirectory: string
   defaultModel?: string
   promptTimeoutMs: number
+  typingPulseMs: number
   welcomeOnConnect?: boolean
 }
 
@@ -39,6 +40,7 @@ export function defaultConfig(): WacConfig {
     opencodeDirectory: join(homedir(), "Desktop"),
     defaultModel: undefined,
     promptTimeoutMs: 15 * 60_000,
+    typingPulseMs: 20_000,
     welcomeOnConnect: true,
   }
 }
@@ -77,6 +79,13 @@ export function loadConfig(overrides?: Partial<WacConfig>): WacConfig {
       }
       config.promptTimeoutMs = clamped
     }
+    if (typeof raw.typingPulseMs === "number" && Number.isFinite(raw.typingPulseMs)) {
+      const clamped = Math.min(60_000, Math.max(10_000, Math.floor(raw.typingPulseMs)))
+      if (clamped !== Math.floor(raw.typingPulseMs)) {
+        console.error(`config: typingPulseMs ${raw.typingPulseMs} clamped to ${clamped} (allowed 10000–60000)`)
+      }
+      config.typingPulseMs = clamped
+    }
     config.welcomeOnConnect = raw.welcomeOnConnect ?? config.welcomeOnConnect
     if (raw.dataDir) config.dataDir = resolve(raw.dataDir)
   } catch (error) {
@@ -95,13 +104,13 @@ export function loadConfig(overrides?: Partial<WacConfig>): WacConfig {
 
 export function writeConfig(config: WacConfig) {
   mkdirSync(config.dataDir, { recursive: true })
-  const { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, dataDir, systemPrompt, opencodeDirectory, defaultModel, promptTimeoutMs, welcomeOnConnect } =
+  const { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, dataDir, systemPrompt, opencodeDirectory, defaultModel, promptTimeoutMs, typingPulseMs, welcomeOnConnect } =
     config
   const path = join(dataDir, "config.json")
   writeFileSync(
     path,
     JSON.stringify(
-      { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, systemPrompt, opencodeDirectory, defaultModel, promptTimeoutMs, welcomeOnConnect },
+      { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, systemPrompt, opencodeDirectory, defaultModel, promptTimeoutMs, typingPulseMs, welcomeOnConnect },
       null,
       2,
     ) + "\n",

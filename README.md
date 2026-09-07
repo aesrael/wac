@@ -10,20 +10,23 @@ Chat with your [opencode](https://opencode.ai) agent from WhatsApp.
 
 ```
 ┌──────────┐  Baileys/QR   ┌──────────────────┐  HTTP  ┌─────────────────┐
-│ WhatsApp │ ───────────► │ wac (Node)       │ ─────► │ opencode serve  │
-│  phone   │               │  chat→session    │        │  @opencode-ai/sdk│
-└──────────┘               │  chunk 4k (n/m)  │        └────────┬────────┘
-                           └────────┬─────────┘                 │
-                                    │ store.json                │
-                           ┌────────▼────────┐                   │
-                           │ ~/.config/wac/  │ ◄─────────────────┘
+│ WhatsApp │ ───────────► │ wac (Node)       │ ───────────────► │ opencode serve  │
+│  phone   │               │  per-chat queue  │                  │  @opencode-ai/sdk│
+└──────────┘               │  chat→session    │                  └────────┬────────┘
+                           │  chunk 4k (n/m)  │                           │
+                           └────────┬─────────┘                           │
+                                    │ store.json                          │
+                           ┌────────▼────────┐                             │
+                           │ ~/.config/wac/  │ ◄───────────────────────────┘
                            │  config.json    │
                            │  store.json     │
                            │  auth/          │
+                           │  outbox/ ◄── external tools drop JSON, sent via live socket
                            └─────────────────┘
 ```
 
 - **Session per chat.** Mapping in `store.json` survives restarts. If opencode loses a session, wac recreates it.
+- **One at a time per chat.** Prompts run serially through a per-chat queue; local commands (`/status`, `/stop`, `/restart`) jump ahead and answer immediately, even during a long prompt.
 - **WhatsApp formatting kept.** `*bold*`, `` `code` ``, ```blocks```, `> quote`, `•` lists. `#` → `*bold*`, `[text](url)` → `text https://url`.
 - **Chunked.** Split at 4000 chars, `(n/m)` suffix, never mid-```fence```.
 - **Welcome DM** on connect so you know it's live.
@@ -74,6 +77,8 @@ DM the bot:
 | `/model <p/m>` | set model for this chat |
 | `/models [n]` | list models (20 default, 100 max) |
 | `/compact` | summarize session |
+| `/stop` | cancel running work |
+| `/restart` | restart wac daemon (opencode untouched) |
 | plain text | prompt for this chat's session |
 
 `/anything-else` → opencode command (`/init`, etc.). Unknown commands are reported, not sent to model.

@@ -18,12 +18,35 @@ export type MessageEvent = {
   text: string
   isGroup: boolean
   fromMe: boolean
+  /** true when recovered from history/backfill after a reconnect, not live delivery */
+  fromHistory?: boolean
   media?: { buffer: Buffer; mime: string; filename?: string }
   mediaError?: "too-large" | "download-failed"
 }
 
 export type StatusListener = (status: ConnectionStatus, qr?: string) => void
 const MAX_MEDIA_BYTES = 25 * 1024 * 1024
+/** Backfill horizon: history messages older than this are never (re)processed */
+const BACKFILL_WINDOW_S = 5 * 60
+/** A half-dead socket must never stall the chat queue behind a send. */
+const SEND_TIMEOUT_MS = 20_000
+const PRESENCE_TIMEOUT_MS = 10_000
+const MEDIA_TIMEOUT_MS = 60_000
+
+/** Race any socket/media await against a deadline so nothing waits forever. */
+async function withTimeout<T>(label: string, ms: number, fn: () => Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
 
 export class WhatsAppClient {
   private socket: ReturnType<typeof makeWASocket> | undefined
@@ -32,6 +55,8 @@ export class WhatsAppClient {
   messageListener: ((event: MessageEvent) => Promise<void> | void) | undefined
   private stopping = false
   private recentOutgoing = new Set<string>()
+  /** message ids already delivered (live or backfill) — stops double-processing across reconnects */
+  private seenIds = new Map<string, number>()
 
   constructor(
     private readonly config: WacConfig,
@@ -84,6 +109,8 @@ export class WhatsAppClient {
       )?.output?.statusCode
       const isLoggedOut = statusCode === DisconnectReason.loggedOut
       const isTerminal = isLoggedOut || statusCode === DisconnectReason.connectionReplaced || statusCode === 403
+      const reasonName = statusCode !== undefined ? (DisconnectReason[statusCode] as string | undefined) : undefined
+      console.log(`WhatsApp: close (code ${statusCode ?? "?"}${reasonName ? ` ${reasonName}` : ""})`)
       if (!this.stopping && !isTerminal) {
         const delay = statusCode === DisconnectReason.restartRequired ? 200 : statusCode === DisconnectReason.connectionClosed ? 1000 : 5000
         setTimeout(() => {
@@ -105,10 +132,13 @@ export class WhatsAppClient {
   }
 
   private async onMessagesUpsert(upsert: { messages: WAMessage[]; type: string }) {
-    if (upsert.type !== "notify") return // ignore history backfills/appends
+    // "notify" = live delivery. Anything else (history sync after a
+    // reconnect) used to be dropped — which silently ate texts sent
+    // while the socket was down. Now: recover recent ones, skip the old.
+    const fromHistory = upsert.type !== "notify"
     // Extract concurrently so one 25MB download doesn't stall other chats;
     // per-chat ordering is still enforced downstream by the enqueue queue.
-    const events = await Promise.all(upsert.messages.map((msg) => this.extractMessage(msg)))
+    const events = await Promise.all(upsert.messages.map((msg) => this.extractMessage(msg, fromHistory)))
     for (const event of events) {
       if (!event) continue
       if (event.fromMe && this.recentOutgoing.has(event.messageId)) {
@@ -141,7 +171,7 @@ export class WhatsAppClient {
     return content
   }
 
-  private async extractMessage(message: WAMessage): Promise<MessageEvent | undefined> {
+  private async extractMessage(message: WAMessage, fromHistory = false): Promise<MessageEvent | undefined> {
     const raw = message.message
     if (!raw) return undefined
     const content = this.unwrap(raw)
@@ -168,13 +198,27 @@ export class WhatsAppClient {
     const isGroup = chatJid.endsWith("@g.us")
     const fromMe = message.key.fromMe === true
     const messageId = message.key.id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    if (this.seenIds.has(messageId)) return undefined // redelivered across reconnect — already handled
+    this.seenIds.set(messageId, Date.now())
+    if (this.seenIds.size > 2000) {
+      // bounded memory: drop oldest quarter (window is minutes anyway)
+      const sorted = [...this.seenIds.entries()].sort((a, b) => a[1] - b[1])
+      for (const [id] of sorted.slice(0, 500)) this.seenIds.delete(id)
+    }
+    if (fromHistory) {
+      if (message.key.fromMe === true) return undefined // our own history — never reprocess
+      const ts = Number(message.messageTimestamp ?? 0)
+      if (!ts || Date.now() / 1000 - ts > BACKFILL_WINDOW_S) return undefined // older than the outage — ignore
+    }
     const senderJid = fromMe ? chatJid : (message.key.participant ?? chatJid)
 
     let media: { buffer: Buffer; mime: string; filename?: string } | undefined
     let mediaError: MessageEvent["mediaError"]
     if (hasMedia) {
       try {
-        const buffer = (await downloadMediaMessage(message, "buffer", {} as never, undefined as never)) as Buffer
+        const buffer = (await withTimeout("media download", MEDIA_TIMEOUT_MS, () =>
+          downloadMediaMessage(message, "buffer", {} as never, undefined as never),
+        )) as Buffer
         if (buffer && buffer.length && buffer.length <= MAX_MEDIA_BYTES) {
           const mime =
             content.imageMessage?.mimetype ??
@@ -201,11 +245,11 @@ export class WhatsAppClient {
 
     // if no text and media failed, report the failure instead of silent drop
     if (!text.trim() && !media) {
-      if (mediaError) return { messageId, chatJid, senderJid, text, isGroup, fromMe, mediaError }
+      if (mediaError) return { messageId, chatJid, senderJid, text, isGroup, fromMe, fromHistory: fromHistory || undefined, mediaError }
       return undefined
     }
 
-    return { messageId, chatJid, senderJid, text, isGroup, fromMe, media, mediaError }
+    return { messageId, chatJid, senderJid, text, isGroup, fromMe, fromHistory: fromHistory || undefined, media, mediaError }
   }
 
   async isAllowed(senderJid: string): Promise<boolean> {
@@ -301,7 +345,8 @@ export class WhatsAppClient {
 
   async startTyping(chatJid: string) {
     try {
-      await this.socket?.sendPresenceUpdate("composing", chatJid)
+      if (!this.socket) return
+      await withTimeout("presence", PRESENCE_TIMEOUT_MS, () => this.socket!.sendPresenceUpdate("composing", chatJid))
     } catch {
       /* best effort */
     }
@@ -309,7 +354,8 @@ export class WhatsAppClient {
 
   async stopTyping(chatJid: string) {
     try {
-      await this.socket?.sendPresenceUpdate("paused", chatJid)
+      if (!this.socket) return
+      await withTimeout("presence", PRESENCE_TIMEOUT_MS, () => this.socket!.sendPresenceUpdate("paused", chatJid))
     } catch {
       /* best effort */
     }
@@ -317,8 +363,9 @@ export class WhatsAppClient {
 
   async sendText(chatJid: string, text: string): Promise<void> {
     if (!text.trim()) return
+    if (!this.socket) throw new Error("WhatsApp socket not connected")
     const content: AnyMessageContent = { text }
-    const result = await this.socket?.sendMessage(chatJid, content)
+    const result = await withTimeout("whatsapp send", SEND_TIMEOUT_MS, () => this.socket!.sendMessage(chatJid, content))
     const id = result?.key?.id
     if (id) {
       this.recentOutgoing.add(id)

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { format } from "node:util"
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, unlinkSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, renameSync, unlinkSync, existsSync } from "node:fs"
 import { execFileSync, spawn } from "node:child_process"
-import { join, normalize, resolve } from "node:path"
+import { join, normalize, resolve, dirname, basename } from "node:path"
 import { authPath, configPath, defaultConfig, ensureDataDir, loadConfig, writeConfig } from "./config.js"
 import type { WacConfig } from "./config.js"
 import { WhatsAppClient, hasCredentials, type MessageEvent } from "./baileys.js"
@@ -81,18 +81,28 @@ class PromptTimeoutError extends Error {
   }
 }
 
-async function promptWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new PromptTimeoutError(timeoutMs)), timeoutMs)
-      }),
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
+async function promptWithTimeout<T>(work: Promise<T>, abort: () => void, timeoutMs: number): Promise<T> {
+  // One timer does both: aborts the underlying fetch (socket dies for real)
+  // and rejects the race. Handlers attach up front, so the late settler
+  // can never surface as an unhandled rejection and take the daemon down.
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try {
+        abort()
+      } catch { /* best effort */ }
+      reject(new PromptTimeoutError(timeoutMs))
+    }, timeoutMs)
+    work.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(timer)
+        reject(e)
+      },
+    )
+  })
 }
 
 function enqueue<T>(chatJid: string, fn: () => Promise<T>): Promise<T> {
@@ -102,11 +112,133 @@ function enqueue<T>(chatJid: string, fn: () => Promise<T>): Promise<T> {
   return next
 }
 
+// --- /restart: detached-successor handover (no supervisor) ---
+
+let restartArmed = false
+
+function projectRoot(): string {
+  const script = process.argv[1] ?? ""
+  if (script) {
+    const dir = dirname(resolve(script))
+    // node dist/index.js serve → <root>/dist ; <root>/bin/* → <root>
+    if (basename(dir) === "dist" || basename(dir) === "bin") return resolve(dir, "..")
+    // node wac serve → <root>/wac (the wrapper lives in the root itself)
+    if (basename(script) === "wac") return dir
+    if (existsSync(join(dir, "package.json"))) return dir
+  }
+  return process.cwd()
+}
+
+function tscEntry(): string | undefined {
+  // launchd runs with a skeletal PATH (no npx), so never rely on PATH
+  // lookup: run the bundled compiler with this same node binary.
+  const cands = [
+    join(projectRoot(), "node_modules", "typescript", "bin", "tsc"),
+    join(projectRoot(), "node_modules", "typescript", "lib", "tsc.js"),
+  ]
+  for (const c of cands) {
+    try {
+      if (existsSync(c)) return c
+    } catch { /* ignore */ }
+  }
+  return undefined
+}
+
+function runTscGate(): { ok: boolean; error?: string } {
+  const entry = tscEntry()
+  if (!entry) return { ok: false, error: "typescript compiler not found under node_modules — run npm install" }
+  try {
+    execFileSync(process.execPath, [entry], { cwd: projectRoot(), timeout: 120_000, stdio: "pipe" })
+    return { ok: true }
+  } catch (error) {
+    const err = error as { stdout?: Buffer; stderr?: Buffer; message?: string }
+    const detail = (err.stderr?.toString() ?? err.stdout?.toString() ?? err.message ?? "tsc failed").trim().split("\n").slice(0, 5).join("\n")
+    return { ok: false, error: detail }
+  }
+}
+
+function successorScript(): string {
+  const root = projectRoot()
+  const dist = join(root, "dist", "index.js")
+  if (existsSync(dist)) return dist
+  return process.argv[1] ?? dist
+}
+
+function spawnSuccessor(oldPid: number): void {
+  const env = { ...process.env, WAC_WELCOME: "0", WAC_TAKEOVER_FROM: String(oldPid) }
+  const child = spawn(process.execPath, [successorScript(), "serve", "--takeover-from", String(oldPid)], {
+    cwd: projectRoot(),
+    detached: true,
+    stdio: "ignore",
+    env,
+  })
+  child.unref()
+}
+
+/** Poll until oldPid is gone (or clearly not wac/node after PID reuse). True = dead, false = still stuck. */
+async function waitForOldDeath(oldPid: number, timeoutMs = 10_000): Promise<boolean> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (!isPidAlive(oldPid)) return true
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  return !isPidAlive(oldPid)
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+  } catch {
+    return false // ESRCH: gone
+  }
+  // PID reuse guard: only treat node/wac as "still the old daemon".
+  try {
+    const out = execFileSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8", timeout: 3000 }).trim()
+    if (!out) return false
+    return out.includes("node") || out.includes("wac")
+  } catch {
+    return true // ps failed: assume alive, keep waiting
+  }
+}
+
+/**
+ * tsc gate → spawn detached successor carrying our PID.
+ * Returns text to reply (error text on failure, undefined on success
+ * meaning the caller should send its own "Restarting…" reply).
+ */
+function attemptRestart(): string | undefined {
+  if (restartArmed) return undefined // duplicate tap while exiting: still exit, one successor only
+  const gate = runTscGate()
+  if (!gate.ok) return `(error) not restarting — build fails:\n${gate.error}`
+  try {
+    spawnSuccessor(process.pid)
+  } catch (error) {
+    return `(error) not restarting — could not spawn successor (${(error as Error).message})`
+  }
+  restartArmed = true
+  return undefined
+}
+
+function scheduleRestartExit(whatsapp: WhatsAppClient, store: Store) {
+  // Reply is flushed by the caller first; give Baileys ~500ms to send,
+  // then disconnect WA (opencode serve stays up, untouched) and exit.
+  // The successor polls our death, then takes over the pidfile + socket.
+  // New socket kicks the old one off WhatsApp — safe direction, we are gone.
+  setTimeout(() => {
+    try {
+      store.flush()
+    } catch { /* best effort */ }
+    void whatsapp.shutdown()
+    setTimeout(() => process.exit(0), 1500)
+  }, 500)
+}
+
 async function handleIncoming(
   whatsapp: WhatsAppClient,
   opencode: OpencodeClientFacade,
   router: SessionRouter,
   config: WacConfig,
+  store: Store,
   event: MessageEvent,
 ) {
   const { chatJid, senderJid, text, isGroup, fromMe } = event
@@ -122,7 +254,33 @@ async function handleIncoming(
     return // non-allowlisted: silent drop, never enqueued
   }
 
-  await enqueue(chatJid, () => processMessage(whatsapp, opencode, router, config, event))
+  // Local commands jump the queue: the agent keeps working in the
+  // background, but /status /restart etc answer immediately and never
+  // wait on a long prompt. Failures reply as (error) text here.
+  const trimmed = text.trim()
+  if (trimmed && isLocalCommand(trimmed)) {
+    try {
+      const result = await handleCommand(router, opencode, config, chatJid, trimmed)
+      if (result.handled) {
+        if (result.restart) {
+          const err = attemptRestart()
+          const s = router.chatSession(chatJid)
+          const label = wacLabel(s?.sessionId, s?.model ?? config.defaultModel)
+          await sendChunked(whatsapp, chatJid, err ?? result.text, label)
+          if (!err) scheduleRestartExit(whatsapp, store)
+          return
+        }
+        const s = router.chatSession(chatJid)
+        await sendChunked(whatsapp, chatJid, result.text, wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
+      }
+    } catch (error) {
+      const s = router.chatSession(chatJid)
+      await sendChunked(whatsapp, chatJid, `(error) ${(error as Error).message}`, wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
+    }
+    return
+  }
+
+  await enqueue(chatJid, () => processMessage(whatsapp, opencode, router, config, store, event))
 }
 
 function effectiveModelFor(router: SessionRouter, config: WacConfig, chatJid: string): string | undefined {
@@ -134,6 +292,7 @@ async function processMessage(
   opencode: OpencodeClientFacade,
   router: SessionRouter,
   config: WacConfig,
+  store: Store,
   event: MessageEvent,
 ) {
   const { chatJid, text, media } = event
@@ -148,6 +307,14 @@ async function processMessage(
     if (text.trim() && isLocalCommand(text)) {
       const result = await handleCommand(router, opencode, config, chatJid, text)
       if (result.handled) {
+        if (result.restart) {
+          const err = attemptRestart()
+          const s = router.chatSession(chatJid)
+          const label = wacLabel(s?.sessionId, s?.model ?? config.defaultModel)
+          await sendChunked(whatsapp, chatJid, err ?? result.text, label)
+          if (!err) scheduleRestartExit(whatsapp, store)
+          return
+        }
         const s = router.chatSession(chatJid)
         await sendChunked(whatsapp, chatJid, result.text, wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
       }
@@ -180,13 +347,17 @@ async function processMessage(
     if (error instanceof PromptTimeoutError) {
       // Fail-fast: abort server-side work so nothing is left running,
       // then terminate. Never retry — re-issuing duplicates side effects.
+      // The abort has its own deadline; if it fails, say so honestly.
+      let cancelled = true
       try {
         if (s?.sessionId) await opencode.abortSession(s.sessionId)
       } catch {
-        /* abort best-effort; session may already be idle */
+        cancelled = false
       }
       const secs = Math.round(config.promptTimeoutMs / 1000)
-      msg = `timed out after ${secs}s, cancelled — nothing left running. Send /new for a fresh session or ask in smaller chunks.`
+      msg = cancelled
+        ? `timed out after ${secs}s, cancelled — nothing left running. Send /new for a fresh session or ask in smaller chunks.`
+        : `timed out after ${secs}s, but the cancel may not have taken — send /stop once, or /new for a fresh session.`
     } else if (error instanceof Error) {
       msg = error.message
     } else {
@@ -214,11 +385,14 @@ async function promptWithRetry(
   }
   // Single attempt, never retry a prompt: opencode may already have executed
   // tools server-side, so re-issuing duplicates side effects. On timeout the
-  // caller aborts the session (fail-fast); nothing is left running.
+  // fetch is aborted (socket dies for real) and the caller aborts the
+  // session best-effort; the abort itself has a deadline and can't jam the queue.
   const mins = Math.max(1, Math.round(config.promptTimeoutMs / 60000))
   const system = `${config.systemPrompt} Reply window: ~${mins} min. Prefer a complete, correct answer; only send a partial plus the next step if it genuinely won't fit.`
+  const ctl = new AbortController()
   return await promptWithTimeout(
-    opencode.prompt(record.sessionId, text, effectiveModel, system, media),
+    opencode.prompt(record.sessionId, text, effectiveModel, system, media, ctl.signal),
+    () => ctl.abort(),
     config.promptTimeoutMs,
   )
 }
@@ -329,7 +503,7 @@ function acquireLock(dataDir: string): void {
       if (Number.isFinite(pid) && pid !== process.pid) {
         try {
           process.kill(pid, 0) // signal 0: existence check only
-          const out = execFileSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8" }).trim()
+          const out = execFileSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf8", timeout: 3000 }).trim()
           if (out && (out.includes("node") || out.includes("wac"))) {
             console.error(`wac is already running (PID ${pid}) — exiting`)
             process.exit(0)
@@ -343,14 +517,29 @@ function acquireLock(dataDir: string): void {
     /* no pid file yet */
   }
   writeFileSync(path, String(process.pid))
-  // auto-release on exit
+  // auto-release on exit — but only if the pidfile still holds OUR pid.
+  // A detached /restart successor rewrites this file after we die; an
+  // unconditional unlink here would delete the successor's lock.
+  const ownPid = process.pid
   process.on("exit", () => {
-    try { unlinkSync(path) } catch { /* best effort */ }
+    try {
+      if (readFileSync(path, "utf8").trim() === String(ownPid)) unlinkSync(path)
+    } catch { /* best effort */ }
   })
 }
 
-async function cmdServe() {
+async function cmdServe(takeoverFrom?: number) {
   const config = ensureConfig()
+  if (takeoverFrom && Number.isFinite(takeoverFrom) && takeoverFrom !== process.pid) {
+    console.log(`takeover: waiting for old PID ${takeoverFrom} to exit…`)
+    const dead = await waitForOldDeath(takeoverFrom)
+    if (!dead) {
+      // Old stuck — stand down, bridge stays up on the old process.
+      console.error(`takeover: old PID ${takeoverFrom} still alive after ~10s — standing down`)
+      process.exit(1)
+    }
+    console.log(`takeover: old PID ${takeoverFrom} gone — taking over`)
+  }
   acquireLock(config.dataDir)
   if (config.allowlist.length === 0) {
     fatal(`config "allowlist" is empty — add your WhatsApp number to ${configPath(config.dataDir)}`)
@@ -385,7 +574,7 @@ async function cmdServe() {
     void qr
   }
 
-  whatsapp.messageListener = (event) => handleIncoming(whatsapp, opencode, router, config, event)
+  whatsapp.messageListener = (event) => handleIncoming(whatsapp, opencode, router, config, store, event)
   startOutbox(whatsapp, config)
 
   const creds = await hasCredentials(authPath(config.dataDir))
@@ -494,11 +683,22 @@ async function cmdStatus() {
   if (!opencodeOk) process.exitCode = 1
 }
 
+// Safety net: a late-settling promise must never take the daemon down
+// (and every queued message with it). Log and survive rejections;
+// genuine crashes still exit via uncaught exceptions and launchd restarts.
+process.on("unhandledRejection", (reason) => {
+  console.error(`unhandled rejection (surviving): ${format(reason)}`)
+})
+
 async function main() {
-  const [command] = process.argv.slice(2)
+  const [command, ...rest] = process.argv.slice(2)
   switch (command) {
-    case "serve":
-      return cmdServe()
+    case "serve": {
+      const flagIdx = rest.findIndex((a) => a === "--takeover-from")
+      const fromFlag = flagIdx >= 0 ? Number(rest[flagIdx + 1]) : NaN
+      const takeover = Number.isFinite(fromFlag) ? fromFlag : Number(process.env.WAC_TAKEOVER_FROM)
+      return cmdServe(Number.isFinite(takeover) ? takeover : undefined)
+    }
     case "qr":
       return cmdQr()
     case "status":
