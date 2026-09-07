@@ -54,7 +54,6 @@ Config (`~/.config/wac/config.json`):
 ```
 
 - `allowlist` — E.164 numbers, fail-closed.
-- `allowCrossSessionAdmin` — optional and false by default; enables cross-session management commands.
 - `npm run launchd` — installs Wac as a macOS LaunchAgent; the generated plist and logs stay outside Git.
 - `opencodePassword` — or `OPENCODE_SERVER_PASSWORD` env. Wac passes it to `opencode serve` if it spawns it.
 - Wac auto-spawns `opencode serve` if not reachable.
@@ -75,6 +74,7 @@ DM the bot:
 | `/delete` | delete current session |
 | `/model` | show chat's model |
 | `/model <p/m>` | set model for this chat |
+| `/model default <p/m>` | set global default model (new chats use it) |
 | `/models [query] [n]` | search/list models (20 default, 100 max) |
 | `/compact` | summarize session |
 | `/stop` | cancel running work |
@@ -114,7 +114,7 @@ Sent within ~15s, deleted on success, renamed `.dead` after 5 failures. Missing
 | `/compact` needs model | `/model <provider/model>` first or set `defaultModel` |
 | Long reply | chunked `(n/m)`, never inside ```fence``` |
 
-Limits: text-only, no groups, no streaming (reply when agent finishes).
+Limits: replies are text-only; no groups; no streaming (reply when agent finishes). Inbound media (images, video, docs, audio) is forwarded to opencode.
 
 ## License
 
