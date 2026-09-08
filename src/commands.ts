@@ -92,6 +92,7 @@ export async function handleCommand(
   config: WacConfig,
   chatJid: string,
   text: string,
+  opts?: { onStop?: (chatJid: string) => boolean },
 ): Promise<CommandResult> {
   const [cmd, ...rest] = text.trim().split(/\s+/)
   const lower = cmd?.toLowerCase()
@@ -315,7 +316,13 @@ export async function handleCommand(
       } catch (error) {
         return { handled: true, text: `Could not cancel: ${(error as Error).message}` }
       }
-      return { handled: true, text: `Cancelled running work in ${current.sessionId.slice(0, 8)}. Send a message to continue.` }
+      const freed = opts?.onStop?.(chatJid) ?? false
+      return {
+        handled: true,
+        text: freed
+          ? `Cancelled running work in ${current.sessionId.slice(0, 8)} and freed the queue. Send a message to continue — /restart if it stays stuck.`
+          : `Cancelled running work in ${current.sessionId.slice(0, 8)}. Send a message to continue — /restart if it stays stuck.`,
+      }
     }
 
     case "/restart": {

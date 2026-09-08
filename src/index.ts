@@ -79,6 +79,29 @@ function wacLabel(sessionId?: string, model?: string): string {
 }
 
 const chatQueues = new Map<string, Promise<void>>()
+// In-flight prompt controllers per chat: /stop aborts the live fetch so the
+// queue frees immediately instead of waiting out the full prompt timeout.
+const promptControllers = new Map<string, AbortController>()
+// Chats the user cancelled: the aborted task's error reply becomes "cancelled".
+const userCancelled = new Set<string>()
+
+function cancelInFlightPrompt(chatJid: string): boolean {
+  const ctl = promptControllers.get(chatJid)
+  if (!ctl) return false
+  userCancelled.add(chatJid)
+  try {
+    ctl.abort()
+  } catch { /* best effort */ }
+  return true
+}
+
+function isCancelError(error: unknown): boolean {
+  if (error instanceof PromptTimeoutError) return false
+  const name = (error as { name?: string })?.name ?? ""
+  const msg = error instanceof Error ? error.message : String(error)
+  const cause = error instanceof Error ? String((error as { cause?: unknown }).cause ?? "") : ""
+  return name === "AbortError" || /abort|cancel/i.test(`${msg} ${cause}`.slice(0, 200))
+}
 class PromptTimeoutError extends Error {
   constructor(timeoutMs: number) {
     super(`opencode prompt timed out after ${Math.round(timeoutMs / 1000)} seconds`)
@@ -311,7 +334,7 @@ async function handleIncoming(
   const trimmed = text.trim()
   if (trimmed && isLocalCommand(trimmed)) {
     try {
-      const result = await handleCommand(router, opencode, config, chatJid, trimmed)
+      const result = await handleCommand(router, opencode, config, chatJid, trimmed, { onStop: cancelInFlightPrompt })
       if (result.handled) {
         if (result.restart) {
           const { error, supervised: sup } = attemptRestart(config.dataDir)
@@ -356,7 +379,7 @@ async function processMessage(
   await whatsapp.startTyping(chatJid)
   try {
     if (text.trim() && isLocalCommand(text)) {
-      const result = await handleCommand(router, opencode, config, chatJid, text)
+      const result = await handleCommand(router, opencode, config, chatJid, text, { onStop: cancelInFlightPrompt })
       if (result.handled) {
         if (result.restart) {
           const { error, supervised: sup } = attemptRestart(config.dataDir)
@@ -395,7 +418,10 @@ async function processMessage(
     const s = router.chatSession(chatJid)
     const label = wacLabel(s?.sessionId, s?.model ?? config.defaultModel)
     let msg: string
-    if (error instanceof PromptTimeoutError) {
+    if (userCancelled.has(chatJid) || isCancelError(error)) {
+      userCancelled.delete(chatJid)
+      msg = "cancelled — nothing left running. Send a message to continue, /restart if it stays stuck."
+    } else if (error instanceof PromptTimeoutError) {
       // Fail-fast: abort server-side work so nothing is left running,
       // then terminate. Never retry — re-issuing duplicates side effects.
       // The abort has its own deadline; if it fails, say so honestly.
@@ -439,11 +465,16 @@ async function promptWithRetry(
   const mins = Math.max(1, Math.round(config.promptTimeoutMs / 60000))
   const system = `${config.systemPrompt} Reply window: ~${mins} min. Prefer a complete, correct answer; only send a partial plus the next step if it genuinely won't fit.`
   const ctl = new AbortController()
-  return await promptWithTimeout(
-    opencode.prompt(record.sessionId, text, effectiveModel, system, media, ctl.signal),
-    () => ctl.abort(),
-    config.promptTimeoutMs,
-  )
+  promptControllers.set(chatJid, ctl)
+  try {
+    return await promptWithTimeout(
+      opencode.prompt(record.sessionId, text, effectiveModel, system, media, ctl.signal),
+      () => ctl.abort(),
+      config.promptTimeoutMs,
+    )
+  } finally {
+    if (promptControllers.get(chatJid) === ctl) promptControllers.delete(chatJid)
+  }
 }
 
 function toJid(number: string): string {
