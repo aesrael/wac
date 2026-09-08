@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 
 export type ChatSession = {
@@ -29,11 +29,51 @@ export class Store {
   }
 
   private read(): StoreData {
+    let rawText: string
     try {
-      const raw = JSON.parse(readFileSync(this.path, "utf8")) as Partial<StoreData>
-      return { version: 1, chats: raw.chats ?? {} }
+      rawText = readFileSync(this.path, "utf8")
+    } catch (error) {
+      // Missing file on first run is fine. Anything else (EPERM, EISDIR…)
+      // fails closed: never reset mappings silently.
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return { version: 1, chats: {} }
+      throw new Error(`wac store unreadable at ${this.path}: ${(error as Error).message} — refusing to reset mappings`)
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(rawText)
+    } catch (error) {
+      this.backupCorrupt(rawText)
+      throw new Error(
+        `wac store corrupt at ${this.path} — original preserved, backup written alongside it. Fix or move it aside to start fresh: ${(error as Error).message}`,
+      )
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      this.backupCorrupt(rawText)
+      throw new Error(`wac store corrupt at ${this.path} — expected {"chats":{…}}, got non-object. Original preserved, backup written.`)
+    }
+    const chats = (parsed as Partial<StoreData>).chats
+    if (chats === undefined) return { version: 1, chats: {} }
+    if (!chats || typeof chats !== "object" || Array.isArray(chats)) {
+      this.backupCorrupt(rawText)
+      throw new Error(`wac store corrupt at ${this.path} — "chats" is not an object. Original preserved, backup written.`)
+    }
+    return { version: 1, chats: chats as Record<string, ChatSession> }
+  }
+
+  /** Best-effort copy of the bad file next to the original. Never throws. */
+  private backupCorrupt(rawText: string) {
+    try {
+      const ts = new Date().toISOString().replace(/[:.]/g, "-")
+      const backup = `${this.path}.corrupt-${ts}.bak`
+      try {
+        copyFileSync(this.path, backup)
+      } catch {
+        writeFileSync(backup, rawText)
+      }
+      chmodSync(backup, 0o600)
+      console.error(`wac store corrupt — original preserved at ${this.path}, copy at ${backup}`)
     } catch {
-      return { version: 1, chats: {} }
+      /* original error below is what matters */
     }
   }
 

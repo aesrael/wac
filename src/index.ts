@@ -51,17 +51,22 @@ async function sendChunked(
   chatJid: string,
   text: string,
   label?: string,
-) {
+): Promise<number> {
   const cleaned = softFormat(text)
   const parts = withSuffix(chunk(cleaned))
+  if (parts.length === 0) return 0
+  let failed = 0
   for (let i = 0; i < parts.length; i++) {
     const body = i === 0 && label ? `${label}\n\n${parts[i]}` : i === 0 ? `◆ wac\n\n${parts[i]}` : parts[i]
     try {
       await whatsapp.sendText(chatJid, body)
     } catch (error) {
-      console.error(`failed to send chunk ${i + 1}/${parts.length}: ${format(error)}`)
+      failed++
+      console.error(`failed to send chunk ${i + 1}/${parts.length} to ${chatJid}: ${format(error)}`)
     }
   }
+  if (failed > 0) console.error(`sendChunked to ${chatJid}: ${failed}/${parts.length} chunks failed — caller sees it as undelivered`)
+  return failed
 }
 
 function wacLabel(sessionId?: string, model?: string): string {
@@ -292,6 +297,9 @@ async function handleIncoming(
   if (isGroup) {
     return
   }
+  if (chatJid.endsWith("@broadcast") || chatJid.endsWith("@newsletter")) {
+    return // stories/broadcast lists/channels: never process
+  }
   const effectiveSender = fromMe ? chatJid : senderJid
   if (!(await whatsapp.isAllowed(effectiveSender))) {
     return // non-allowlisted: silent drop, never enqueued
@@ -491,7 +499,8 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig) {
         if (!allowed.has(to) || !(to.endsWith("@s.whatsapp.net") || to.endsWith("@lid"))) {
           throw new Error("outbox recipient is not allowlisted")
         }
-        await sendChunked(whatsapp, to, body)
+        const failed = await sendChunked(whatsapp, to, body)
+        if (failed > 0) throw new Error(`whatsapp send failed (${failed} chunks undelivered) — keeping for retry`)
         unlinkSync(path)
         failures.delete(file)
         console.log(`outbox sent ${file}`)

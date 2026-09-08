@@ -193,6 +193,7 @@ export class WhatsAppClient {
 
     const chatJid = message.key.remoteJid ?? ""
     if (!chatJid) return undefined
+    if (chatJid.endsWith("@broadcast") || chatJid.endsWith("@newsletter")) return undefined // stories/broadcasts/channels: never process
     const isGroup = chatJid.endsWith("@g.us")
     const fromMe = message.key.fromMe === true
     const messageId = message.key.id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
