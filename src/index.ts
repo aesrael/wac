@@ -474,6 +474,9 @@ async function promptWithRetry(
     )
   } finally {
     if (promptControllers.get(chatJid) === ctl) promptControllers.delete(chatJid)
+    // /stop can race a prompt that has already settled successfully; never
+    // let that stale marker relabel a later, unrelated error as cancelled.
+    userCancelled.delete(chatJid)
   }
 }
 
