@@ -68,10 +68,13 @@ DM the bot:
 | `/status` | WhatsApp + opencode status |
 | `/sessions` | list sessions + chat mapping |
 | `/session <id>` | switch this chat to another session |
+| `/session delete [<n>\|all] [confirm]` | delete session(s), same rules as `/delete` |
+| `/delete` | delete current session (alias for `/session delete`) |
 | `/new` `/clear` | fresh session for this chat |
 | `/fork [message-id]` | fork this chat's session at a message point |
 | `/current` | current session (+ model) |
 | `/delete` | delete current session |
+| `/delete all` | delete every session (needs `confirm`) |
 | `/model` | show chat's model |
 | `/model <p/m>` | set model for this chat |
 | `/model default <p/m>` | set global default model (new chats use it) |
@@ -112,6 +115,7 @@ Sent within ~15s, deleted on success, renamed `.dead` after 5 failures. Missing
 | `(error)` on prompt | `opencode serve` down — wac auto-spawns, retry next message |
 | `Session not found` | opencode restarted — wac creates fresh session |
 | `/compact` needs model | `/model <provider/model>` first or set `defaultModel` |
+| `No models match` / `Unknown model` for IDs that CLI lists | `opencode serve` is stale — `/restart` leaves it untouched; kill the `opencode serve` process and restart wac so it spawns a fresh one |
 | Long reply | chunked `(n/m)`, never inside ```fence``` |
 
 Limits: replies are text-only; no groups; no streaming (reply when agent finishes). Inbound media (images, video, docs, audio) is forwarded to opencode.

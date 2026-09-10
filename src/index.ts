@@ -463,7 +463,7 @@ async function promptWithRetry(
   // fetch is aborted (socket dies for real) and the caller aborts the
   // session best-effort; the abort itself has a deadline and can't jam the queue.
   const mins = Math.max(1, Math.round(config.promptTimeoutMs / 60000))
-  const system = `${config.systemPrompt} Reply window: ~${mins} min. Prefer a complete, correct answer; only send a partial plus the next step if it genuinely won't fit.`
+  const system = `${config.systemPrompt} Reply window: approx ${mins} min. Prefer a complete, correct answer; only send a partial plus the next step if it genuinely won't fit.`
   const ctl = new AbortController()
   promptControllers.set(chatJid, ctl)
   try {

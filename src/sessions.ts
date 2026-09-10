@@ -100,6 +100,15 @@ export class SessionRouter {
     return this.store.get(chatJid)
   }
 
+  allChatIds(): string[] {
+    return Object.keys(this.store.all())
+  }
+
+  /** Drop a chat mapping without touching the server (server copy already gone). */
+  detachChat(chatJid: string): void {
+    this.store.delete(chatJid)
+  }
+
   mappedCount(): number {
     return Object.keys(this.store.all()).length
   }
