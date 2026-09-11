@@ -22,6 +22,8 @@ export type MessageEvent = {
   fromMe: boolean
   /** true when recovered from history/backfill after a reconnect, not live delivery */
   fromHistory?: boolean
+  /** disappearing-timer seconds observed on the inbound message, if any */
+  ephemeralExpiration?: number
   media?: { buffer: Buffer; mime: string; filename?: string }
   mediaError?: "too-large" | "download-failed"
 }
@@ -59,6 +61,8 @@ export class WhatsAppClient {
   private recentOutgoing = new Set<string>()
   /** message ids already delivered (live or backfill) — stops double-processing across reconnects */
   private seenIds = new Map<string, number>()
+  /** per-chat disappearing timer (seconds) last observed on inbound — mirrored on replies */
+  private chatEphemeral = new Map<string, number>()
 
   constructor(
     private readonly config: WacConfig,
@@ -171,9 +175,51 @@ export class WhatsAppClient {
     return content
   }
 
+  private parseExpiration(value: unknown): number | undefined {
+    const n = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN
+    if (!Number.isFinite(n) || n <= 0 || n > 7776000) return undefined
+    return Math.floor(n)
+  }
+
+  private contextExpiration(content: Record<string, any>): number | undefined {
+    const candidates = [
+      content?.extendedTextMessage?.contextInfo?.expiration,
+      content?.imageMessage?.contextInfo?.expiration,
+      content?.videoMessage?.contextInfo?.expiration,
+      content?.documentMessage?.contextInfo?.expiration,
+      content?.audioMessage?.contextInfo?.expiration,
+      content?.stickerMessage?.contextInfo?.expiration,
+      content?.messageContextInfo?.expiration,
+    ]
+    for (const c of candidates) {
+      const parsed = this.parseExpiration(c)
+      if (parsed) return parsed
+    }
+    return undefined
+  }
+
+  /** Disappearing-timer seconds on an inbound message, if any. Wrapper presence alone implies ephemeral. */
+  private inboundEphemeralExpiration(raw: NonNullable<WAMessage["message"]>): number | undefined {
+    const anyRaw = raw as unknown as Record<string, any>
+    const epi = anyRaw["ephemeralMessage"]
+    if (epi && typeof epi === "object") {
+      const inner = (epi as { message?: Record<string, any> }).message
+      if (inner && typeof inner === "object") {
+        const fromInner = this.contextExpiration(inner)
+        if (fromInner) return fromInner
+      }
+      const wrapperExp =
+        (epi as { messageContextInfo?: { expiration?: unknown } }).messageContextInfo?.expiration ??
+        (epi as { expiration?: unknown }).expiration
+      return this.parseExpiration(wrapperExp) ?? 7 * 24 * 60 * 60
+    }
+    return this.contextExpiration(anyRaw)
+  }
+
   private async extractMessage(message: WAMessage, fromHistory = false): Promise<MessageEvent | undefined> {
     const raw = message.message
     if (!raw) return undefined
+    const ephemeralExpiration = this.inboundEphemeralExpiration(raw)
     const content = this.unwrap(raw)
     const text =
       content.conversation ??
@@ -196,6 +242,11 @@ export class WhatsAppClient {
     const chatJid = message.key.remoteJid ?? ""
     if (!chatJid) return undefined
     if (chatJid.endsWith("@broadcast") || chatJid.endsWith("@newsletter")) return undefined // stories/broadcasts/channels: never process
+    // Mirror disappearing timers: remember the last observed setting per chat
+    // (self-chat fromMe included — that's where the user's timer lives).
+    // Non-ephemeral inbound clears it so turning the timer off sticks.
+    if (ephemeralExpiration) this.chatEphemeral.set(chatJid, ephemeralExpiration)
+    else this.chatEphemeral.delete(chatJid)
     const isGroup = chatJid.endsWith("@g.us")
     const fromMe = message.key.fromMe === true
     const messageId = message.key.id ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -256,11 +307,11 @@ export class WhatsAppClient {
 
     // if no text and media failed, report the failure instead of silent drop
     if (!text.trim() && !media && !quoted) {
-      if (mediaError) return { messageId, chatJid, senderJid, text, quoted, isGroup, fromMe, fromHistory: fromHistory || undefined, mediaError }
+      if (mediaError) return { messageId, chatJid, senderJid, text, quoted, isGroup, fromMe, fromHistory: fromHistory || undefined, ephemeralExpiration, mediaError }
       return undefined
     }
 
-    return { messageId, chatJid, senderJid, text, quoted, isGroup, fromMe, fromHistory: fromHistory || undefined, media, mediaError }
+    return { messageId, chatJid, senderJid, text, quoted, isGroup, fromMe, fromHistory: fromHistory || undefined, ephemeralExpiration, media, mediaError }
   }
 
   /** Pull readable text out of a quotedMessage payload (already unwrapped shape). */
@@ -386,13 +437,21 @@ export class WhatsAppClient {
     }
   }
 
-  async sendText(chatJid: string, text: string): Promise<void> {
+  async sendText(chatJid: string, text: string, opts?: { ephemeralExpiration?: number }): Promise<void> {
     if (!text.trim()) return
     if (!this.socket) throw new Error("WhatsApp socket not connected")
     // linkPreview: null disables baileys' auto-fetch-on-send (link-preview-js has an
     // unpatched SSRF via DNS rebinding - GHSA-4gp8-rjrq-ch6q / GHSA-cpjf-6666-r8fx).
     const content: AnyMessageContent = { text, linkPreview: null }
-    const result = await withTimeout("whatsapp send", SEND_TIMEOUT_MS, () => this.socket!.sendMessage(chatJid, content))
+    // Mirror the chat's disappearing timer when known, so replies vanish on
+    // the same schedule as the user's messages. Newsletters can't be ephemeral
+    // (Baileys drops the flag there); groups never reach this path.
+    const ephemeralExpiration = opts?.ephemeralExpiration ?? this.chatEphemeral.get(chatJid)
+    const result = await withTimeout("whatsapp send", SEND_TIMEOUT_MS, () =>
+      ephemeralExpiration
+        ? this.socket!.sendMessage(chatJid, content, { ephemeralExpiration })
+        : this.socket!.sendMessage(chatJid, content),
+    )
     const id = result?.key?.id
     if (id) {
       this.recentOutgoing.add(id)
