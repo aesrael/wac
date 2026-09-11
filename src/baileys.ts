@@ -16,6 +16,8 @@ export type MessageEvent = {
   chatJid: string
   senderJid: string
   text: string
+  /** text of the WhatsApp message this was sent as a reply to, if any */
+  quoted?: string
   isGroup: boolean
   fromMe: boolean
   /** true when recovered from history/backfill after a reconnect, not live delivery */
@@ -242,13 +244,37 @@ export class WhatsAppClient {
       }
     }
 
+    // quoted reply? Baileys nests the original under contextInfo.quotedMessage
+    // on whichever wrapper carried the new message (text or captioned media).
+    const quotedRaw = this.unwrapQuoted(
+      content.extendedTextMessage?.contextInfo?.quotedMessage ??
+      content.imageMessage?.contextInfo?.quotedMessage ??
+      content.videoMessage?.contextInfo?.quotedMessage ??
+      content.documentMessage?.contextInfo?.quotedMessage,
+    )
+    const quoted = quotedRaw.slice(0, 1000) || undefined
+
     // if no text and media failed, report the failure instead of silent drop
-    if (!text.trim() && !media) {
-      if (mediaError) return { messageId, chatJid, senderJid, text, isGroup, fromMe, fromHistory: fromHistory || undefined, mediaError }
+    if (!text.trim() && !media && !quoted) {
+      if (mediaError) return { messageId, chatJid, senderJid, text, quoted, isGroup, fromMe, fromHistory: fromHistory || undefined, mediaError }
       return undefined
     }
 
-    return { messageId, chatJid, senderJid, text, isGroup, fromMe, fromHistory: fromHistory || undefined, media, mediaError }
+    return { messageId, chatJid, senderJid, text, quoted, isGroup, fromMe, fromHistory: fromHistory || undefined, media, mediaError }
+  }
+
+  /** Pull readable text out of a quotedMessage payload (already unwrapped shape). */
+  private unwrapQuoted(quoted: unknown): string {
+    if (!quoted || typeof quoted !== "object") return ""
+    const q = this.unwrap(quoted as NonNullable<WAMessage["message"]>)
+    const text =
+      (q as { conversation?: string }).conversation ??
+      (q as { extendedTextMessage?: { text?: string } }).extendedTextMessage?.text ??
+      (q as { imageMessage?: { caption?: string } }).imageMessage?.caption ??
+      (q as { videoMessage?: { caption?: string } }).videoMessage?.caption ??
+      (q as { documentMessage?: { caption?: string } }).documentMessage?.caption ??
+      ""
+    return text.trim()
   }
 
   async isAllowed(senderJid: string): Promise<boolean> {

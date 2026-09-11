@@ -370,7 +370,9 @@ async function processMessage(
   event: MessageEvent,
 ) {
   const { chatJid, text, media } = event
-  if (!text.trim() && !media && event.mediaError) {
+  // quoted reply context rides along to the model, never into command parsing
+  const promptText = event.quoted ? `> ${event.quoted.split("\n").join("\n> ")}\n\n${text}` : text
+  if (!text.trim() && !media && !event.quoted && event.mediaError) {
     const why = event.mediaError === "too-large" ? "Media was too large (>25MB) to download." : "Couldn't download that media."
     const s = router.chatSession(chatJid)
     await sendChunked(whatsapp, chatJid, `(error) ${why} Try a smaller file or add a caption.`, wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
@@ -407,7 +409,7 @@ async function processMessage(
       }
     }
 
-    const result = await promptWithRetry(opencode, router, chatJid, record, text, config, media)
+    const result = await promptWithRetry(opencode, router, chatJid, record, promptText, config, media)
     if (result.isEmpty || result.error) {
       await sendChunked(whatsapp, chatJid, `(error) ${result.error ?? "model returned nothing readable — wrong or unpaid model?"}`, wacLabel(record.sessionId, record.model ?? config.defaultModel))
       return
