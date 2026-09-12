@@ -1,48 +1,170 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "permission": {
-    "*": "allow",
-    "read": {
-      "*": "allow",
-      "~/.config/wac/auth/**": "deny",
-      "~/.config/wac/config.json": "deny",
-      "~/.config/wac/store.json": "deny",
-      "~/.config/wac/outbox/**": "deny",
-      "~/.config/wac/logs/**": "deny",
-      "~/.config/opencode/auth.json": "deny",
-      "*.env": "deny",
-      "*.env.*": "deny"
+  "permissions": [
+    {
+      "action": "*",
+      "resource": "*",
+      "effect": "allow"
     },
-    "edit": {
-      "*": "allow",
-      "~/.config/wac/auth/**": "deny",
-      "~/.config/wac/config.json": "deny",
-      "~/.config/wac/store.json": "deny",
-      "~/.config/wac/outbox/**": "deny",
-      "~/.config/wac/logs/**": "deny",
-      "~/.config/opencode/auth.json": "deny",
-      "*.env": "deny",
-      "*.env.*": "deny"
+    {
+      "action": "read",
+      "resource": "*",
+      "effect": "allow"
     },
-    "glob": {
-      "*": "allow",
-      "~/.config/wac/**": "deny"
+    {
+      "action": "read",
+      "resource": "~/.config/wac/auth/**",
+      "effect": "deny"
     },
-    "grep": {
-      "*": "allow",
-      "~/.config/wac/**": "deny"
+    {
+      "action": "read",
+      "resource": "~/.config/wac/config.json",
+      "effect": "deny"
     },
-    "bash": {
-      "*": "allow",
-      "*wac/auth*": "deny",
-      "*wac/config.json*": "deny",
-      "*wac/store.json*": "deny",
-      "*wac/outbox*": "deny",
-      "*wac/logs*": "deny",
-      "*opencode/auth.json*": "deny",
-      "*.env*": "deny",
-      "*OPENCODE_SERVER_PASSWORD*": "deny",
-      "*printenv*": "deny"
+    {
+      "action": "read",
+      "resource": "~/.config/wac/store.json",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "~/.config/wac/outbox/**",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "~/.config/wac/logs/**",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "~/.config/opencode/auth.json",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "*.env",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "*.env.*",
+      "effect": "deny"
+    },
+    {
+      "action": "edit",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "edit",
+      "resource": "~/.config/wac/auth/**",
+      "effect": "deny"
+    },
+    {
+      "action": "edit",
+      "resource": "~/.config/wac/config.json",
+      "effect": "deny"
+    },
+    {
+      "action": "edit",
+      "resource": "~/.config/wac/store.json",
+      "effect": "deny"
+    },
+    {
+      "action": "edit",
+      "resource": "~/.config/wac/outbox/**",
+      "effect": "deny"
+    },
+    {
+      "action": "edit",
+      "resource": "~/.config/wac/logs/**",
+      "effect": "deny"
+    },
+    {
+      "action": "edit",
+      "resource": "~/.config/opencode/auth.json",
+      "effect": "deny"
+    },
+    {
+      "action": "edit",
+      "resource": "*.env",
+      "effect": "deny"
+    },
+    {
+      "action": "edit",
+      "resource": "*.env.*",
+      "effect": "deny"
+    },
+    {
+      "action": "glob",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "glob",
+      "resource": "~/.config/wac/**",
+      "effect": "deny"
+    },
+    {
+      "action": "grep",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "grep",
+      "resource": "~/.config/wac/**",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "shell",
+      "resource": "*wac/auth*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*wac/config.json*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*wac/store.json*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*wac/outbox*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*wac/logs*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*opencode/auth.json*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*.env*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*OPENCODE_SERVER_PASSWORD*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*printenv*",
+      "effect": "deny"
     }
-  }
+  ]
 }
