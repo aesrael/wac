@@ -25,6 +25,8 @@ export type MessageEvent = {
   fromHistory?: boolean
   /** disappearing-timer seconds observed on the inbound message, if any */
   ephemeralExpiration?: number
+  /** unix seconds when WhatsApp sent it (messageTimestamp) */
+  sentAt?: number
   media?: { buffer: Buffer; mime: string; filename?: string }
   mediaError?: "too-large" | "download-failed"
 }
@@ -263,7 +265,8 @@ export class WhatsAppClient {
       const ts = Number(message.messageTimestamp ?? 0)
       if (!ts || Date.now() / 1000 - ts > BACKFILL_WINDOW_S) return undefined // older than the outage — ignore
     }
-    const senderJid = fromMe ? chatJid : (message.key.participant ?? chatJid)
+    const senderJid = fromMe ? chatJid : (message.key.participant || chatJid)
+    const sentAt = Number(message.messageTimestamp ?? 0) || undefined
 
     let media: { buffer: Buffer; mime: string; filename?: string } | undefined
     let mediaError: MessageEvent["mediaError"]
@@ -308,11 +311,11 @@ export class WhatsAppClient {
 
     // if no text and media failed, report the failure instead of silent drop
     if (!text.trim() && !media && !quoted) {
-      if (mediaError) return { messageId, chatJid, senderJid, text, quoted, isGroup, fromMe, fromHistory: fromHistory || undefined, ephemeralExpiration, mediaError }
+      if (mediaError) return { messageId, chatJid, senderJid, text, quoted, isGroup, fromMe, fromHistory: fromHistory || undefined, ephemeralExpiration, sentAt, mediaError }
       return undefined
     }
 
-    return { messageId, chatJid, senderJid, text, quoted, isGroup, fromMe, fromHistory: fromHistory || undefined, ephemeralExpiration, media, mediaError }
+    return { messageId, chatJid, senderJid, text, quoted, isGroup, fromMe, fromHistory: fromHistory || undefined, ephemeralExpiration, sentAt, media, mediaError }
   }
 
   /** Pull readable text out of a quotedMessage payload (already unwrapped shape). */

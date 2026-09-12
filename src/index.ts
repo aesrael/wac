@@ -392,7 +392,11 @@ async function processMessage(
 ) {
   const { chatJid, text, media } = event
   // quoted reply context rides along to the model, never into command parsing
-  const promptText = event.quoted ? `> ${event.quoted.split("\n").join("\n> ")}\n\n${text}` : text
+  // inbound send-time rides as a short prefix so the model can anchor reminders and late delivery
+  const when = event.sentAt
+    ? new Date(event.sentAt * 1000).toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })
+    : ""
+  const promptText = (when ? `[${when}] ` : "") + (event.quoted ? `> ${event.quoted.split("\n").join("\n> ")}\n\n${text}` : text)
   if (!text.trim() && !media && !event.quoted && event.mediaError) {
     const why = event.mediaError === "too-large" ? "Media was too large (>25MB) to download." : "Couldn't download that media."
     const s = router.chatSession(chatJid)
