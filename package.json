@@ -20,7 +20,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "^1.18.26",
+    "@opencode/client": "^2.0.2",
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "link-preview-js": "^3.2.0",
     "qrcode-terminal": "^0.12.0",
