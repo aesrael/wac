@@ -106,6 +106,19 @@ python3 -c "import json,time; json.dump({'text':'hello','created':int(time.time(
 Sent within ~15s, deleted on success, renamed `.dead` after 5 failures. Missing
 `to` → first allowlisted number. Files queued >5 min get a staleness prefix.
 
+## Images
+
+The agent can attach images inline in a reply with a marker:
+
+```
+[image:/abs/path/shot.png created a new board layout]
+```
+
+Each marker is sent as a real WhatsApp image (caption up to the closing `]`),
+then stripped from the text. Paths must be absolute; a missing file degrades to
+a visible `(image not found: …)` note. Outbox JSON also accepts an `image` field
+with an absolute path.
+
 ## Troubleshooting
 
 | Symptom | Fix |

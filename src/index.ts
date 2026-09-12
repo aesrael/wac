@@ -46,16 +46,37 @@ function ensureConfig(): WacConfig {
   }
 }
 
+// Outbound media: the agent can embed `[image:/abs/path.png optional caption]`
+// anywhere in a reply — each marker is sent as a real WhatsApp image and removed
+// from the text before chunking.
+const IMAGE_RE = /\[image:(\S+)(?:\s+([^\]]*))?\]/g
+function extractImages(text: string): { body: string; images: { path: string; caption: string }[] } {
+  const images: { path: string; caption: string }[] = []
+  const body = text.replace(IMAGE_RE, (marker: string, path: string, caption?: string) => {
+    if (!existsSync(path)) return `(image not found: ${path})`
+    images.push({ path, caption: (caption ?? "").trim() })
+    return ""
+  })
+  return { body, images }
+}
+
 async function sendChunked(
   whatsapp: WhatsAppClient,
   chatJid: string,
   text: string,
   label?: string,
 ): Promise<number> {
-  const cleaned = softFormat(text)
-  const parts = withSuffix(chunk(cleaned))
-  if (parts.length === 0) return 0
+  const { body: cleaned, images } = extractImages(softFormat(text))
   let failed = 0
+  for (const image of images) {
+    try {
+      await whatsapp.sendImage(chatJid, image.path, image.caption)
+    } catch (error) {
+      failed++
+      console.error(`failed to send image ${image.path} to ${chatJid}: ${format(error)}`)
+    }
+  }
+  const parts = withSuffix(chunk(cleaned))
   for (let i = 0; i < parts.length; i++) {
     const body = i === 0 && label ? `${label}\n\n${parts[i]}` : i === 0 ? `◆ wac\n\n${parts[i]}` : parts[i]
     try {
@@ -493,6 +514,7 @@ const OUTBOX_POLL_MS = 15_000
 type OutboxMessage = {
   to?: string
   text?: string
+  image?: string
   created?: number
 }
 
@@ -531,11 +553,14 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig) {
           ageMin > 5
             ? `(queued ${new Date(msg.created as number).toLocaleString()})\n\n${msg.text}`
             : msg.text
+        const payload = typeof msg.image === "string" && msg.image.trim()
+          ? `${msg.text.trim()}\n[image:${msg.image.trim()}]`
+          : body
         const to = msg.to ? toJid(msg.to) : toJid(config.allowlist[0])
         if (!allowed.has(to) || !(to.endsWith("@s.whatsapp.net") || to.endsWith("@lid"))) {
           throw new Error("outbox recipient is not allowlisted")
         }
-        const failed = await sendChunked(whatsapp, to, body)
+        const failed = await sendChunked(whatsapp, to, payload)
         if (failed > 0) throw new Error(`whatsapp send failed (${failed} chunks undelivered) — keeping for retry`)
         unlinkSync(path)
         failures.delete(file)

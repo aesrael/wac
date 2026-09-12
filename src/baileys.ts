@@ -7,6 +7,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys"
 import { useMultiFileAuthState } from "@whiskeysockets/baileys"
 import QRCode from "qrcode-terminal"
+import { readFile } from "node:fs/promises"
 import { WacConfig } from "./config.js"
 
 export type ConnectionStatus = "connecting" | "open" | "close" | "qr"
@@ -446,6 +447,23 @@ export class WhatsAppClient {
     // Mirror the chat's disappearing timer when known, so replies vanish on
     // the same schedule as the user's messages. Newsletters can't be ephemeral
     // (Baileys drops the flag there); groups never reach this path.
+    const ephemeralExpiration = opts?.ephemeralExpiration ?? this.chatEphemeral.get(chatJid)
+    const result = await withTimeout("whatsapp send", SEND_TIMEOUT_MS, () =>
+      ephemeralExpiration
+        ? this.socket!.sendMessage(chatJid, content, { ephemeralExpiration })
+        : this.socket!.sendMessage(chatJid, content),
+    )
+    const id = result?.key?.id
+    if (id) {
+      this.recentOutgoing.add(id)
+      setTimeout(() => this.recentOutgoing.delete(id), 30_000)
+    }
+  }
+
+  async sendImage(chatJid: string, filePath: string, caption?: string, opts?: { ephemeralExpiration?: number }): Promise<void> {
+    if (!this.socket) throw new Error("WhatsApp socket not connected")
+    const image = await readFile(filePath)
+    const content: AnyMessageContent = caption?.trim() ? { image, caption: caption.trim() } : { image }
     const ephemeralExpiration = opts?.ephemeralExpiration ?? this.chatEphemeral.get(chatJid)
     const result = await withTimeout("whatsapp send", SEND_TIMEOUT_MS, () =>
       ephemeralExpiration
