@@ -348,6 +348,9 @@ async function handleIncoming(
   if (!(await whatsapp.isAllowed(effectiveSender))) {
     return // non-allowlisted: silent drop, never enqueued
   }
+  // Ack as read once accepted: blue ticks for the sender, clears the
+  // linked-device unread. Best effort, never blocks the reply.
+  await whatsapp.markRead(chatJid, event.messageId, fromMe)
 
   // Local commands jump the queue: the agent keeps working in the
   // background, but /status /restart etc answer immediately and never
@@ -564,7 +567,12 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig, router: Sessio
         if (!allowed.has(to) || !(to.endsWith("@s.whatsapp.net") || to.endsWith("@lid"))) {
           throw new Error("outbox recipient is not allowlisted")
         }
-        const s = router.chatSession(to)
+        // Store is keyed by incoming chat JID (usually @lid); the allowlist
+        // number normalises to @s.whatsapp.net, so fall back to the first
+        // mapped chat rather than sending label-less.
+        const direct = router.chatSession(to)
+        const fallbackId = direct ? undefined : router.allChatIds()[0]
+        const s = direct ?? (fallbackId ? router.chatSession(fallbackId) : undefined)
         const failed = await sendChunked(whatsapp, to, payload,
           wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
         if (failed > 0) throw new Error(`whatsapp send failed (${failed} chunks undelivered) — keeping for retry`)

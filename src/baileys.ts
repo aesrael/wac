@@ -441,6 +441,16 @@ export class WhatsAppClient {
     }
   }
 
+  async markRead(chatJid: string, messageId: string, fromMe: boolean) {
+    try {
+      if (!this.socket || !messageId || fromMe) return // own messages need no receipt
+      await withTimeout("whatsapp read", PRESENCE_TIMEOUT_MS, () =>
+        this.socket!.readMessages([{ remoteJid: chatJid, id: messageId }]))
+    } catch {
+      /* best effort — a missing blue tick is never worth a crash */
+    }
+  }
+
   async sendText(chatJid: string, text: string, opts?: { ephemeralExpiration?: number }): Promise<void> {
     if (!text.trim()) return
     if (!this.socket) throw new Error("WhatsApp socket not connected")
