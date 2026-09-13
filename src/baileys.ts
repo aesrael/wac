@@ -144,7 +144,8 @@ export class WhatsAppClient {
     // while the socket was down. Now: recover recent ones, skip the old.
     const fromHistory = upsert.type !== "notify"
     // Extract concurrently so one 25MB download doesn't stall other chats;
-    // per-chat ordering is still enforced downstream by the enqueue queue.
+    // reply ordering per chat is enforced downstream by the send chain,
+    // and /wait keeps its own serial pipe.
     const events = await Promise.all(upsert.messages.map((msg) => this.extractMessage(msg, fromHistory)))
     for (const event of events) {
       if (!event) continue

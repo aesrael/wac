@@ -166,6 +166,7 @@ export function helpText(): string {
     "  /clear      same as /new",
     "  /fork [message-id]  fork this chat's session at a message point (message-id from opencode, not a /sessions number)",
     "  /stop       cancel the currently running work in this chat's session",
+    "  /wait <message>  queue this behind the running reply (one reply per message; alias /w)",
     "  /restart    restart the wac daemon (opencode untouched)",
     "  /compact    compact the current session",
     "  /current    show the current session for this chat",

@@ -11,7 +11,7 @@ Chat with your [opencode](https://opencode.ai) agent from WhatsApp.
 ```
 ┌──────────┐  Baileys/QR   ┌──────────────────┐  HTTP  ┌─────────────────┐
 │ WhatsApp │ ───────────► │ wac (Node)       │ ───────────────► │ opencode serve  │
-│  phone   │               │  per-chat queue  │                  │  @opencode-ai/sdk│
+│  phone   │               │ send-through+/wait │                  │  @opencode-ai/sdk│
 └──────────┘               │  chat→session    │                  └────────┬────────┘
                            │  chunk 4k (n/m)  │                           │
                            └────────┬─────────┘                           │
@@ -26,7 +26,8 @@ Chat with your [opencode](https://opencode.ai) agent from WhatsApp.
 ```
 
 - **Session per chat.** Mapping in `store.json` survives restarts. If opencode loses a session, wac recreates it.
-- **One at a time per chat.** Prompts run serially through a per-chat queue; local commands (`/status`, `/stop`, `/restart`) jump ahead and answer immediately, even during a long prompt.
+- **Send-through by default.** Plain prompts go straight to opencode — the server inbox merges them, overlapping runs dedupe on delivery so WhatsApp never gets doubles. `/wait <text>` keeps the old serial pipe: runs only after the live reply sends, one reply per message.
+- **WhatsApp formatting kept.** `*bold*`, `` `code` ``, ```blocks```, `> quote`, `•` lists. `#` → `*bold*`, `[text](url)` → `text https://url`.
 - **WhatsApp formatting kept.** `*bold*`, `` `code` ``, ```blocks```, `> quote`, `•` lists. `#` → `*bold*`, `[text](url)` → `text https://url`.
 - **Chunked.** Split at 4000 chars, `(n/m)` suffix, never mid-```fence```.
 - **Welcome DM** on connect so you know it's live.
@@ -81,6 +82,7 @@ DM the bot:
 | `/models [query] [n]` | search/list models (20 default, 100 max) |
 | `/compact` | summarize session |
 | `/stop` | cancel running work |
+| `/wait <message>` | queue behind the running reply (alias `/w`) |
 | `/restart` | restart wac daemon (opencode untouched) |
 | plain text | prompt for this chat's session |
 

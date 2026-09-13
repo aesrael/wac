@@ -100,20 +100,108 @@ function wacLabel(sessionId?: string, model?: string): string {
 }
 
 const chatQueues = new Map<string, Promise<void>>()
-// In-flight prompt controllers per chat: /stop aborts the live fetch so the
-// queue frees immediately instead of waiting out the full prompt timeout.
-const promptControllers = new Map<string, AbortController>()
+// /wait pipe: plain prompts send straight through (see handleIncoming) and
+// this chain is now opt-in per message, preserving one-reply-per-message.
+// In-flight prompt controllers per chat: /stop aborts every live fetch so
+// overlapping send-through runs all die instead of waiting out timeouts.
+const promptControllers = new Map<string, Set<AbortController>>()
 // Chats the user cancelled: the aborted task's error reply becomes "cancelled".
 const userCancelled = new Set<string>()
 
+function trackController(chatJid: string, ctl: AbortController): void {
+  let set = promptControllers.get(chatJid)
+  if (!set) {
+    set = new Set()
+    promptControllers.set(chatJid, set)
+  }
+  set.add(ctl)
+}
+
+function untrackController(chatJid: string, ctl: AbortController): void {
+  const set = promptControllers.get(chatJid)
+  if (!set) return
+  set.delete(ctl)
+  if (set.size === 0) promptControllers.delete(chatJid)
+}
+
 function cancelInFlightPrompt(chatJid: string): boolean {
-  const ctl = promptControllers.get(chatJid)
-  if (!ctl) return false
+  const set = promptControllers.get(chatJid)
+  if (!set || set.size === 0) return false
   userCancelled.add(chatJid)
-  try {
-    ctl.abort()
-  } catch { /* best effort */ }
+  for (const ctl of set) {
+    try {
+      ctl.abort()
+    } catch { /* best effort */ }
+  }
   return true
+}
+
+// In-flight send-through runs per chat: /wait drains a snapshot of these
+// before running, so it truly waits for the live reply. (The /wait
+// enqueue chain alone can't do this — send-through bypasses that chain,
+// so without this /wait would fire immediately.)
+const inflightRuns = new Map<string, Set<Promise<void>>>()
+
+function trackRun(chatJid: string): () => void {
+  let set = inflightRuns.get(chatJid)
+  if (!set) {
+    set = new Set()
+    inflightRuns.set(chatJid, set)
+  }
+  let release!: () => void
+  const p = new Promise<void>((resolve) => { release = resolve })
+  set.add(p)
+  return () => {
+    set!.delete(p)
+    release()
+    if (set!.size === 0) inflightRuns.delete(chatJid)
+  }
+}
+
+async function drainRuns(chatJid: string): Promise<void> {
+  const snapshot = [...(inflightRuns.get(chatJid) ?? [])]
+  if (snapshot.length === 0) return
+  await Promise.allSettled(snapshot)
+}
+
+// Delivered opencode message ids per chat (cap ~50): overlapping
+// send-through waits can resolve on the same covering turn, and each would
+// otherwise send that same reply to WhatsApp. First sender wins.
+const deliveredIds = new Map<string, Set<string>>()
+const MAX_DELIVERED = 50
+// Per-chat send chain: concurrent replies can't interleave chunks.
+const sendChains = new Map<string, Promise<void>>()
+
+function alreadyDelivered(chatJid: string, id: string): boolean {
+  let set = deliveredIds.get(chatJid)
+  if (!set) {
+    set = new Set()
+    deliveredIds.set(chatJid, set)
+  }
+  if (set.has(id)) return true
+  set.add(id)
+  while (set.size > MAX_DELIVERED) {
+    const oldest = set.values().next()
+    if (oldest.done) break
+    set.delete(oldest.value)
+  }
+  return false
+}
+
+// Send a prompt reply exactly once per opencode message id. Replies without
+// an id (local errors) send directly via sendChunked as before.
+async function sendReplyOnce(
+  whatsapp: WhatsAppClient,
+  chatJid: string,
+  messageId: string | undefined,
+  text: string,
+  label?: string,
+): Promise<number> {
+  if (messageId && alreadyDelivered(chatJid, messageId)) return 0
+  const prev = sendChains.get(chatJid) ?? Promise.resolve()
+  const next = prev.then(() => sendChunked(whatsapp, chatJid, text, label))
+  sendChains.set(chatJid, next.catch(() => undefined).then(() => undefined))
+  return next
 }
 
 function isCancelError(error: unknown): boolean {
@@ -378,7 +466,35 @@ async function handleIncoming(
     return
   }
 
-  await enqueue(chatJid, () => processMessage(whatsapp, opencode, router, config, store, event))
+  // /wait <text> (alias /w): opt into the old serial pipe — drains
+  // then runs, one reply per message. Plain text sends straight through
+  // instead: opencode's inbox merges it and overlapping waits dedupe on
+  // delivery (see sendReplyOnce).
+  const waitMatch = trimmed.match(/^\/w(?:ait)?(?:\s+(.*))?$/s)
+  if (waitMatch) {
+    const rest = (waitMatch[1] ?? "").trim()
+    if (!rest) {
+      const s = router.chatSession(chatJid)
+      await sendChunked(whatsapp, chatJid, "Usage: /wait <message> — queue this behind the running reply.", wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
+      return
+    }
+    await enqueue(chatJid, async () => {
+      await drainRuns(chatJid)
+      await processMessage(whatsapp, opencode, router, config, store, { ...event, text: rest })
+    })
+    return
+  }
+
+  const done = trackRun(chatJid)
+  void (async () => {
+    try {
+      await processMessage(whatsapp, opencode, router, config, store, event)
+    } catch (error) {
+      console.error(`send-through error: ${format(error)}`)
+    } finally {
+      done()
+    }
+  })()
 }
 
 function effectiveModelFor(router: SessionRouter, config: WacConfig, chatJid: string): string | undefined {
@@ -439,10 +555,10 @@ async function processMessage(
 
     const result = await promptWithRetry(opencode, router, chatJid, record, promptText, config, media)
     if (result.isEmpty || result.error) {
-      await sendChunked(whatsapp, chatJid, `(error) ${result.error ?? "model returned nothing readable — wrong or unpaid model?"}`, wacLabel(record.sessionId, record.model ?? config.defaultModel))
+      await sendReplyOnce(whatsapp, chatJid, result.message?.id, `(error) ${result.error ?? "model returned nothing readable — wrong or unpaid model?"}`, wacLabel(record.sessionId, record.model ?? config.defaultModel))
       return
     }
-    await sendChunked(whatsapp, chatJid, result.text || "(no text reply)", wacLabel(record.sessionId, record.model ?? config.defaultModel))
+    await sendReplyOnce(whatsapp, chatJid, result.message?.id, result.text || "(no text reply)", wacLabel(record.sessionId, record.model ?? config.defaultModel))
   } catch (error) {
     console.error(`handler error: ${format(error)}`)
     const s = router.chatSession(chatJid)
@@ -495,7 +611,7 @@ async function promptWithRetry(
   const mins = Math.max(1, Math.round(config.promptTimeoutMs / 60000))
   const system = `${config.systemPrompt} Reply window: approx ${mins} min. Prefer a complete, correct answer; only send a partial plus the next step if it genuinely won't fit.`
   const ctl = new AbortController()
-  promptControllers.set(chatJid, ctl)
+  trackController(chatJid, ctl)
   try {
     return await promptWithTimeout(
       opencode.prompt(record.sessionId, text, effectiveModel, system, media, ctl.signal),
@@ -503,7 +619,7 @@ async function promptWithRetry(
       config.promptTimeoutMs,
     )
   } finally {
-    if (promptControllers.get(chatJid) === ctl) promptControllers.delete(chatJid)
+    untrackController(chatJid, ctl)
     // /stop can race a prompt that has already settled successfully; never
     // let that stale marker relabel a later, unrelated error as cancelled.
     userCancelled.delete(chatJid)
