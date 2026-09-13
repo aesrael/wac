@@ -528,7 +528,7 @@ type OutboxMessage = {
  * The daemon sends them through its own socket (no second Baileys
  * connection) and deletes on success. Stale files get an age prefix.
  */
-function startOutbox(whatsapp: WhatsAppClient, config: WacConfig) {
+function startOutbox(whatsapp: WhatsAppClient, config: WacConfig, router: SessionRouter) {
   const dir = join(config.dataDir, "outbox")
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   const failures = new Map<string, number>()
@@ -564,7 +564,9 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig) {
         if (!allowed.has(to) || !(to.endsWith("@s.whatsapp.net") || to.endsWith("@lid"))) {
           throw new Error("outbox recipient is not allowlisted")
         }
-        const failed = await sendChunked(whatsapp, to, payload)
+        const s = router.chatSession(to)
+        const failed = await sendChunked(whatsapp, to, payload,
+          wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
         if (failed > 0) throw new Error(`whatsapp send failed (${failed} chunks undelivered) — keeping for retry`)
         unlinkSync(path)
         failures.delete(file)
@@ -717,7 +719,7 @@ async function cmdServe(takeoverFrom?: number) {
   }
 
   whatsapp.messageListener = (event) => handleIncoming(whatsapp, opencode, router, config, store, event)
-  startOutbox(whatsapp, config)
+  startOutbox(whatsapp, config, router)
 
   const creds = await hasCredentials(authPath(config.dataDir))
   if (!creds) {
