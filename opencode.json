@@ -165,6 +165,66 @@
       "action": "shell",
       "resource": "*printenv*",
       "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "* env*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*;env*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*|env*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*env *",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*/bin/env*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "* set *",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*;set*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*|set*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*/proc/*/environ*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*wac/*.bak*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*wac/*.tmp*",
+      "effect": "deny"
+    },
+    {
+      "action": "shell",
+      "resource": "*wac/*.corrupt-*",
+      "effect": "deny"
     }
   ]
 }

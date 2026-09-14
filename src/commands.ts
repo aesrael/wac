@@ -1,5 +1,5 @@
 import type { WacConfig } from "./config.js"
-import { writeConfig } from "./config.js"
+import { writeConfig, WAC_COMMAND_ORDER } from "./config.js"
 import { OpencodeClientFacade } from "./serve-client.js"
 import type { SessionRouter } from "./sessions.js"
 import type { ChatSession } from "./store.js"
@@ -8,7 +8,11 @@ export type CommandResult =
   | { handled: true; text: string; restart?: boolean }
   | { handled: false; text?: undefined }
 
-const LOCAL_COMMANDS = new Set(["/help", "/status", "/sessions", "/session", "/new", "/clear", "/fork", "/stop", "/model", "/models", "/compact", "/current", "/delete", "/restart"])
+// Routing set derived from the canonical order in config.ts — single source,
+// so the prompt's bare list can't drift. /wait stays out: the serial pipe in
+// index.ts handles it before handleCommand, and the early return there would
+// swallow it silently.
+const LOCAL_COMMANDS = new Set<string>(WAC_COMMAND_ORDER.filter((c) => c !== "/wait"))
 
 export function isLocalCommand(text: string): boolean {
   const first = text.split(/\s+/, 1)[0]?.toLowerCase()

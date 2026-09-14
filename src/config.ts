@@ -1,9 +1,35 @@
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, resolve } from "node:path"
 
 export const DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 export const DEFAULT_USERNAME = "opencode"
+
+// Canonical wac-local command list — single source for the routing set
+// (commands.ts) and the seed prompt's bare list (below). /wait is handled
+// by the serial pipe in index.ts, not handleCommand, so commands.ts
+// excludes it from routing (the early return there would swallow it).
+export const WAC_COMMAND_ORDER = [
+  "/help",
+  "/sessions",
+  "/session",
+  "/new",
+  "/clear",
+  "/fork",
+  "/stop",
+  "/wait",
+  "/restart",
+  "/model",
+  "/models",
+  "/compact",
+  "/current",
+  "/delete",
+  "/status",
+] as const
+
+export function promptCommandList(): string {
+  return [...WAC_COMMAND_ORDER].join(" ")
+}
 
 export const DEFAULT_SYSTEM_PROMPT =
   "You are wac, an assistant reached over WhatsApp. Replies are delivered as WhatsApp text messages. " +
@@ -11,8 +37,11 @@ export const DEFAULT_SYSTEM_PROMPT =
   "Use WhatsApp-native formatting where it helps: *bold*, _italic_, `inline code`, ```code blocks```, > quotes, and • bullet lists. " +
   "Avoid # headings and | tables | (render as plain lists instead). For links use plain https:// URLs as tappable links — never wrap URLs in `backticks` or [markdown](url) syntax. " +
   "For approximations use the ≈ character — never use the tilde character for approx because in WhatsApp it renders as strikethrough. " +
-  "Useful user commands: /help (list commands), /sessions (list sessions), /session <id> (switch), /new or /clear (fresh session), /fork [message-id] (fork at message), /stop (cancel running work), /wait or /w <message> (queue behind the running reply), /restart (restart daemon), /model <provider/model> and /model default <provider/model> (chat/global model) and /models [query] [n] (model), /compact (summarize), /current (show session), /delete (remove), /status (connection). Explain them when asked. " +
-  "Work within a reply window stated per request (typically several minutes): prefer complete, correct answers and use the tools you need — don't rush or skip verification to save time. Only if a task genuinely won't fit in the window, send the best result so far plus the single next step to continue in a follow-up. " +
+  "Commands: " +
+  promptCommandList() +
+  " — explain only when asked. " +
+  "To send an image, embed [image:/abs/path optional caption] inline with an absolute path. " +
+  "Use tools to verify — don't rush or skip verification to save time. " +
   "Answer directly, then stop."
 
 export type WacConfig = {
@@ -104,17 +133,25 @@ export function loadConfig(overrides?: Partial<WacConfig>): WacConfig {
 }
 
 export function writeConfig(config: WacConfig) {
-  mkdirSync(config.dataDir, { recursive: true })
+  mkdirSync(config.dataDir, { recursive: true, mode: 0o700 })
   const { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, dataDir, systemPrompt, opencodeDirectory, defaultModel, promptTimeoutMs, typingPulseMs, welcomeOnConnect } =
     config
   const path = join(dataDir, "config.json")
-  writeFileSync(
-    path,
+  const tmp = `${path}.tmp`
+  const data =
     JSON.stringify(
       { allowlist, opencodeBaseUrl, opencodeUsername, opencodePassword, name, systemPrompt, opencodeDirectory, defaultModel, promptTimeoutMs, typingPulseMs, welcomeOnConnect },
       null,
       2,
-    ) + "\n",
-  )
-  chmodSync(path, 0o600)
+    ) + "\n"
+  // Atomic tmp+rename like Store.flush: a crash mid-write never truncates
+  // config.json. Mode at creation closes the world-readable window.
+  try {
+    writeFileSync(tmp, data, { mode: 0o600 })
+    renameSync(tmp, path)
+    chmodSync(path, 0o600)
+  } catch {
+    writeFileSync(path, data, { mode: 0o600 })
+    chmodSync(path, 0o600)
+  }
 }

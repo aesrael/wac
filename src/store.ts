@@ -26,7 +26,7 @@ export class Store {
   constructor(dir: string) {
     this.dir = dir
     this.path = join(dir, "store.json")
-    mkdirSync(dir, { recursive: true })
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
     chmodSync(dir, 0o700)
     this.data = this.read()
   }
@@ -71,7 +71,7 @@ export class Store {
       try {
         copyFileSync(this.path, backup)
       } catch {
-        writeFileSync(backup, rawText)
+        writeFileSync(backup, rawText, { mode: 0o600 })
       }
       chmodSync(backup, 0o600)
       console.error(`wac store corrupt — original preserved at ${this.path}, copy at ${backup}`)
@@ -108,11 +108,11 @@ export class Store {
     }
     const tmp = `${this.path}.tmp`
     try {
-      writeFileSync(tmp, JSON.stringify(this.data, null, 2) + "\n")
+      writeFileSync(tmp, JSON.stringify(this.data, null, 2) + "\n", { mode: 0o600 })
       renameSync(tmp, this.path)
       chmodSync(this.path, 0o600)
     } catch {
-      writeFileSync(this.path, JSON.stringify(this.data, null, 2) + "\n")
+      writeFileSync(this.path, JSON.stringify(this.data, null, 2) + "\n", { mode: 0o600 })
       chmodSync(this.path, 0o600)
     }
   }

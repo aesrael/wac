@@ -110,6 +110,28 @@ export function chunk(text: string, max: number = MAX_CHUNK_SIZE): string[] {
           break
         }
       }
+      if (adjusted <= start) {
+        // Nothing safe behind us (e.g. an unclosed fence swallows the rest):
+        // look ahead for the next safe split instead of cutting mid-fence.
+        const ceiling = Math.min(input.length, cut + 512)
+        for (let pos = cut + 1; pos <= ceiling; pos++) {
+          if (!isSplitForbidden(pos)) {
+            adjusted = pos
+            break
+          }
+        }
+      }
+      if (adjusted <= start) {
+        // Still nothing safe (e.g. a fence with no close in range): end this
+        // chunk at the enclosing fence's closing line so the split never
+        // lands mid-fence. The next chunk then starts outside the fence.
+        const enclosing = fences.find(([s, e]) => cut > s && cut < e)
+        if (enclosing) {
+          const closeLineEnd = input.indexOf("\n", enclosing[1])
+          const atClose = closeLineEnd === -1 ? input.length : closeLineEnd + 1
+          if (atClose > start) adjusted = Math.min(atClose, input.length)
+        }
+      }
       cut = adjusted > start ? adjusted : budgetCut
     }
 
