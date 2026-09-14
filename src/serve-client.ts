@@ -218,7 +218,13 @@ export class OpencodeClientFacade {
         await this.client.session.switchModel({ sessionID: sessionId, model: ref }, ...(signal ? [{ signal }] : []))
       }
       const mediaList = media ? (Array.isArray(media) ? media : [media]) : []
-      const effectiveText = text.trim() || (mediaList.length ? "Describe this image and answer any question about it." : text)
+      const mime0 = mediaList[0]?.mime ?? ""
+      const fallback = mime0.startsWith("audio/")
+        ? "Transcribe this audio and answer any question about it."
+        : mime0.startsWith("image/")
+          ? "Describe this image and answer any question about it."
+          : "Summarize this file and answer any question about it."
+      const effectiveText = text.trim() || (mediaList.length ? fallback : text)
       // v2 has no per-prompt system field: fold it into the message body. The
       // caller sends it once per session (first turn / post-compact), so this
       // param is usually undefined and the text goes through untouched.

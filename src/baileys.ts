@@ -8,6 +8,7 @@ import makeWASocket, {
 import { useMultiFileAuthState } from "@whiskeysockets/baileys"
 import QRCode from "qrcode-terminal"
 import { readFile } from "node:fs/promises"
+import { basename } from "node:path"
 import { WacConfig } from "./config.js"
 
 export type ConnectionStatus = "connecting" | "open" | "close" | "qr"
@@ -28,7 +29,7 @@ export type MessageEvent = {
   /** unix seconds when WhatsApp sent it (messageTimestamp) */
   sentAt?: number
   media?: { buffer: Buffer; mime: string; filename?: string }
-  mediaError?: "too-large" | "download-failed"
+  mediaError?: "too-large" | "download-failed" | "unsupported"
 }
 
 export type StatusListener = (status: ConnectionStatus, qr?: string) => void
@@ -241,7 +242,18 @@ export class WhatsAppClient {
       !!content.audioMessage ||
       !!content.stickerMessage
 
-    if (!text.trim() && !hasMedia) return undefined
+    // location pins, contacts, polls etc have no text and aren't downloadable —
+    // fail loud downstream instead of dropping silently. Reactions, votes and
+    // live-location pings are signals not prompts — drop those silently.
+    const c = content as Record<string, unknown>
+    const unsupportedKind =
+      (c["locationMessage"] ? "location" : null) ??
+      (c["contactMessage"] ? "contact" : null) ??
+      (c["contactsArrayMessage"] ? "contacts" : null) ??
+      (c["pollCreationMessage"] ? "poll" : null) ??
+      null
+
+    if (!text.trim() && !hasMedia && !unsupportedKind) return undefined
 
     const chatJid = message.key.remoteJid ?? ""
     if (!chatJid) return undefined
@@ -270,7 +282,7 @@ export class WhatsAppClient {
     const sentAt = Number(message.messageTimestamp ?? 0) || undefined
 
     let media: { buffer: Buffer; mime: string; filename?: string } | undefined
-    let mediaError: MessageEvent["mediaError"]
+    let mediaError: MessageEvent["mediaError"] = unsupportedKind ? "unsupported" : undefined
     if (hasMedia) {
       try {
         const buffer = (await withTimeout("media download", MEDIA_TIMEOUT_MS, () =>
@@ -478,6 +490,35 @@ export class WhatsAppClient {
     if (!this.socket) throw new Error("WhatsApp socket not connected")
     const image = await readFile(filePath)
     const content: AnyMessageContent = caption?.trim() ? { image, caption: caption.trim() } : { image }
+    const ephemeralExpiration = opts?.ephemeralExpiration ?? this.chatEphemeral.get(chatJid)
+    const result = await withTimeout("whatsapp send", SEND_TIMEOUT_MS, () =>
+      ephemeralExpiration
+        ? this.socket!.sendMessage(chatJid, content, { ephemeralExpiration })
+        : this.socket!.sendMessage(chatJid, content),
+    )
+    const id = result?.key?.id
+    if (id) {
+      this.recentOutgoing.add(id)
+      setTimeout(() => this.recentOutgoing.delete(id), 30_000)
+    }
+  }
+
+  async sendDocument(chatJid: string, filePath: string, caption?: string, opts?: { ephemeralExpiration?: number }): Promise<void> {
+    if (!this.socket) throw new Error("WhatsApp socket not connected")
+    const document = await readFile(filePath)
+    const fileName = basename(filePath).slice(0, 255) || `file-${Date.now()}`
+    const ext = fileName.split(".").pop()?.toLowerCase() ?? ""
+    const mimetype =
+      ext === "pdf" ? "application/pdf"
+      : ext === "txt" ? "text/plain"
+      : ext === "csv" ? "text/csv"
+      : ext === "zip" ? "application/zip"
+      : ext === "mp3" ? "audio/mpeg"
+      : ext === "mp4" ? "video/mp4"
+      : "application/octet-stream"
+    const content: AnyMessageContent = caption?.trim()
+      ? { document, fileName, mimetype, caption: caption.trim() }
+      : { document, fileName, mimetype }
     const ephemeralExpiration = opts?.ephemeralExpiration ?? this.chatEphemeral.get(chatJid)
     const result = await withTimeout("whatsapp send", SEND_TIMEOUT_MS, () =>
       ephemeralExpiration

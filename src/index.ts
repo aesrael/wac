@@ -60,13 +60,27 @@ function extractImages(text: string): { body: string; images: { path: string; ca
   return { body, images }
 }
 
+// Outbound documents: `[file:/abs/path.pdf optional caption]` — sent as a real
+// WhatsApp document. Same contract as images, separate marker so old prompts keep working.
+const FILE_RE = /\[file:(\S+)(?:\s+([^\]]*))?\]/g
+function extractFiles(text: string): { body: string; files: { path: string; caption: string }[] } {
+  const files: { path: string; caption: string }[] = []
+  const body = text.replace(FILE_RE, (marker: string, path: string, caption?: string) => {
+    if (!existsSync(path)) return `(file not found: ${path})`
+    files.push({ path, caption: (caption ?? "").trim() })
+    return ""
+  })
+  return { body, files }
+}
+
 async function sendChunked(
   whatsapp: WhatsAppClient,
   chatJid: string,
   text: string,
   label?: string,
 ): Promise<number> {
-  const { body: cleaned, images } = extractImages(softFormat(text))
+  const { body: afterImages, images } = extractImages(softFormat(text))
+  const { body: cleaned, files } = extractFiles(afterImages)
   let failed = 0
   for (const image of images) {
     try {
@@ -74,6 +88,14 @@ async function sendChunked(
     } catch (error) {
       failed++
       console.error(`failed to send image ${image.path} to ${chatJid}: ${format(error)}`)
+    }
+  }
+  for (const file of files) {
+    try {
+      await whatsapp.sendDocument(chatJid, file.path, file.caption)
+    } catch (error) {
+      failed++
+      console.error(`failed to send file ${file.path} to ${chatJid}: ${format(error)}`)
     }
   }
   const parts = withSuffix(chunk(cleaned))
@@ -517,7 +539,12 @@ async function processMessage(
     : ""
   const promptText = (when ? `[${when}] ` : "") + (event.quoted ? `> ${event.quoted.split("\n").join("\n> ")}\n\n${text}` : text)
   if (!text.trim() && !media && !event.quoted && event.mediaError) {
-    const why = event.mediaError === "too-large" ? "Media was too large (>25MB) to download." : "Couldn't download that media."
+    const why =
+      event.mediaError === "too-large"
+        ? "Media was too large (>25MB) to download."
+        : event.mediaError === "unsupported"
+          ? "I can't read that yet (location / contact / poll / reaction). Send text or a photo/video/doc/voice note."
+          : "Couldn't download that media."
     const s = router.chatSession(chatJid)
     await sendChunked(whatsapp, chatJid, `(error) ${why} Try a smaller file or add a caption.`, wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
     return
