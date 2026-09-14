@@ -219,8 +219,9 @@ export class OpencodeClientFacade {
       }
       const mediaList = media ? (Array.isArray(media) ? media : [media]) : []
       const effectiveText = text.trim() || (mediaList.length ? "Describe this image and answer any question about it." : text)
-      // v2 has no per-prompt system field: fold it into the message body ahead
-      // of the user text, as it rode every turn under v1 as well.
+      // v2 has no per-prompt system field: fold it into the message body. The
+      // caller sends it once per session (first turn / post-compact), so this
+      // param is usually undefined and the text goes through untouched.
       const body = system ? `${system}\n\n${effectiveText}` : effectiveText
       const files = mediaList.map((m) => ({
         uri: `data:${m.mime};base64,${m.buffer.toString("base64")}`,

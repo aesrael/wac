@@ -610,14 +610,21 @@ async function promptWithRetry(
   // session best-effort; the abort itself has a deadline and can't jam the queue.
   const mins = Math.max(1, Math.round(config.promptTimeoutMs / 60000))
   const system = `${config.systemPrompt} Reply window: approx ${mins} min. Prefer a complete, correct answer; only send a partial plus the next step if it genuinely won't fit.`
+  // Send the system prompt once per session: the opencode session persists, so
+  // folding ~300 words into every turn is pure spend. Fresh sessions (and the
+  // first turn after /compact) get it; everything else rides the history.
+  const seed = record.systemSeeded ? undefined : system
   const ctl = new AbortController()
   trackController(chatJid, ctl)
   try {
-    return await promptWithTimeout(
-      opencode.prompt(record.sessionId, text, effectiveModel, system, media, ctl.signal),
+    const result = await promptWithTimeout(
+      opencode.prompt(record.sessionId, text, effectiveModel, seed, media, ctl.signal),
       () => ctl.abort(),
       config.promptTimeoutMs,
     )
+    // Only mark on success: a failed turn never delivered the seed.
+    router.markSystemSeeded(chatJid, record.sessionId)
+    return result
   } finally {
     untrackController(chatJid, ctl)
     // /stop can race a prompt that has already settled successfully; never

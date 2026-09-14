@@ -7,6 +7,9 @@ export type ChatSession = {
   model?: string
   createdAt: number
   updatedAt: number
+  /** True once the system prompt has been folded into this session's first
+      turn. Lets the bridge send it once per session instead of every message. */
+  systemSeeded?: boolean
 }
 
 export type StoreData = {

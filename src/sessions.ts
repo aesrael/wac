@@ -100,6 +100,27 @@ export class SessionRouter {
     return this.store.get(chatJid)
   }
 
+  /** Mark the mapped session as seeded with the system prompt (persisted).
+      Guards on sessionId so a record swapped mid-prompt (e.g. /new racing a
+      running reply) never gets marked without receiving the prompt. */
+  markSystemSeeded(chatJid: string, sessionId: string): void {
+    const existing = this.store.get(chatJid)
+    if (!existing || existing.sessionId !== sessionId || existing.systemSeeded) return
+    existing.systemSeeded = true
+    existing.updatedAt = Date.now()
+    this.store.set(chatJid, existing)
+  }
+
+  /** Clear the seed flag so the next prompt re-sends the system prompt once
+      (used after /compact, which may dilute the folded-in instructions). */
+  clearSystemSeeded(chatJid: string): void {
+    const existing = this.store.get(chatJid)
+    if (!existing || !existing.systemSeeded) return
+    delete existing.systemSeeded
+    existing.updatedAt = Date.now()
+    this.store.set(chatJid, existing)
+  }
+
   allChatIds(): string[] {
     return Object.keys(this.store.all())
   }
@@ -142,6 +163,8 @@ export class SessionRouter {
       sessionId: forked.id,
       title: forked.title || existing.title || forked.id,
       ...(existing.model ? { model: existing.model } : {}),
+      // Forked history carries the seeded first turn, so no re-send needed.
+      ...(existing.systemSeeded ? { systemSeeded: true } : {}),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     }

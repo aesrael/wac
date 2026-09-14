@@ -333,6 +333,8 @@ export async function handleCommand(
       }
       const effective = router.chatSession(chatJid)?.model ?? config.defaultModel
       await client.summarize(sid, effective)
+      // Compacting may dilute the folded-in system prompt: re-seed once next turn.
+      router.clearSystemSeeded(chatJid)
       return { handled: true, text: `Compacting ${sid.slice(0, 8)}…` }
     }
 
