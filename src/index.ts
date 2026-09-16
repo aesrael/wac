@@ -724,7 +724,7 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig, router: Sessio
         const fallbackId = direct ? undefined : router.allChatIds()[0]
         const s = direct ?? (fallbackId ? router.chatSession(fallbackId) : undefined)
         const failed = await sendChunked(whatsapp, to, payload,
-          wacLabel(s?.sessionId, s?.model ?? config.defaultModel))
+          wacLabel(undefined, s?.model ?? config.defaultModel))
         if (failed > 0) throw new Error(`whatsapp send failed (${failed} chunks undelivered) — keeping for retry`)
         unlinkSync(path)
         failures.delete(file)
