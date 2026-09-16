@@ -717,14 +717,12 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig, router: Sessio
         if (!allowed.has(to) || !(to.endsWith("@s.whatsapp.net") || to.endsWith("@lid"))) {
           throw new Error("outbox recipient is not allowlisted")
         }
-        // Store is keyed by incoming chat JID (usually @lid); the allowlist
-        // number normalises to @s.whatsapp.net, so fall back to the first
-        // mapped chat rather than sending label-less.
-        const direct = router.chatSession(to)
-        const fallbackId = direct ? undefined : router.allChatIds()[0]
-        const s = direct ?? (fallbackId ? router.chatSession(fallbackId) : undefined)
+        // Read-only lookup: never remaps. Direct chat session only —
+        // no first-chat fallback, so an unmapped recipient stays
+        // session-less instead of wearing an unrelated chat's id.
+        const s = router.chatSession(to)
         const failed = await sendChunked(whatsapp, to, payload,
-          wacLabel(undefined, s?.model ?? config.defaultModel))
+          s ? wacLabel(s.sessionId, s.model ?? config.defaultModel) : wacLabel(undefined, config.defaultModel))
         if (failed > 0) throw new Error(`whatsapp send failed (${failed} chunks undelivered) — keeping for retry`)
         unlinkSync(path)
         failures.delete(file)
