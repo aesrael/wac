@@ -40,6 +40,7 @@ export const DEFAULT_SYSTEM_PROMPT =
   "Commands: " +
   promptCommandList() +
   " — explain only when asked. " +
+  "Never use the interactive question/picker tool — WhatsApp is plain text only; ask options as a plain bullet list and accept a plain text reply. " +
   "To send an image, embed [image:/abs/path optional caption] inline with an absolute path. " +
   "Use tools to verify — don't rush or skip verification to save time. " +
   "Answer directly, then stop."
