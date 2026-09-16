@@ -28,7 +28,6 @@ Chat with your [opencode](https://opencode.ai) agent from WhatsApp.
 - **Session per chat.** Mapping in `store.json` survives restarts. If opencode loses a session, wac recreates it.
 - **Send-through by default.** Plain prompts go straight to opencode — the server inbox merges them, overlapping runs dedupe on delivery so WhatsApp never gets doubles. `/wait <text>` keeps the old serial pipe: runs only after the live reply sends, one reply per message.
 - **WhatsApp formatting kept.** `*bold*`, `` `code` ``, ```blocks```, `> quote`, `•` lists. `#` → `*bold*`, `[text](url)` → `text https://url`.
-- **WhatsApp formatting kept.** `*bold*`, `` `code` ``, ```blocks```, `> quote`, `•` lists. `#` → `*bold*`, `[text](url)` → `text https://url`.
 - **Chunked.** Split at 4000 chars, `(n/m)` suffix, never mid-```fence```.
 - **Welcome DM** on connect so you know it's live.
 
