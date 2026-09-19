@@ -804,17 +804,85 @@ function acquireLock(dataDir: string): void {
   })
 }
 
+/** PIDs (besides our own) running this same daemon entrypoint. */
+function siblingServePids(ownPid: number, entry: string): number[] {
+  const out: number[] = []
+  try {
+    const ps = execFileSync("ps", ["-ax", "-o", "pid=,command="], { encoding: "utf8", timeout: 5000 })
+    for (const line of ps.split("\n")) {
+      const m = line.trim().match(/^(\d+)\s+(.*)$/)
+      if (!m) continue
+      const pid = Number(m[1])
+      if (pid === ownPid) continue
+      if (m[2].includes(entry) && /(^|\s)serve(\s|$)/.test(m[2])) out.push(pid)
+    }
+  } catch { /* ps failed: cull nothing */ }
+  return out
+}
+
+function sameEntryCmd(cmd: string, entry: string): boolean {
+  return !!cmd && cmd.includes(entry) && /(^|\s)serve(\s|$)/.test(cmd)
+}
+
+/** TERM, wait, KILL a stale generation — re-verifying cmdline so PID reuse
+ *  never kills an innocent process. True = gone (or was never ours). */
+async function killStalePid(pid: number, entry: string): Promise<boolean> {
+  const cmdOf = (p: number): string => {
+    try {
+      return execFileSync("ps", ["-p", String(p), "-o", "command="], { encoding: "utf8", timeout: 3000 }).trim()
+    } catch {
+      return ""
+    }
+  }
+  if (!sameEntryCmd(cmdOf(pid), entry)) return true
+  try {
+    process.kill(pid, "SIGTERM")
+  } catch {
+    return true
+  }
+  const start = Date.now()
+  while (Date.now() - start < 3000) {
+    await new Promise((r) => setTimeout(r, 250))
+    if (!sameEntryCmd(cmdOf(pid), entry)) return true
+  }
+  try {
+    process.kill(pid, "SIGKILL")
+  } catch {
+    return true
+  }
+  await new Promise((r) => setTimeout(r, 500))
+  return !sameEntryCmd(cmdOf(pid), entry)
+}
+
 async function cmdServe(takeoverFrom?: number) {
   const config = ensureConfig()
+  const entry = resolve(process.argv[1] ?? "")
   if (takeoverFrom && Number.isFinite(takeoverFrom) && takeoverFrom !== process.pid) {
     console.log(`takeover: waiting for old PID ${takeoverFrom} to exit…`)
     const dead = await waitForOldDeath(takeoverFrom)
     if (!dead) {
-      // Old stuck — stand down, bridge stays up on the old process.
-      console.error(`takeover: old PID ${takeoverFrom} still alive after ~10s — standing down`)
-      process.exit(1)
+      // Old stuck (long prompt, wedged socket) — terminate it instead of
+      // standing down, otherwise both generations hold the WA session.
+      console.error(`takeover: old PID ${takeoverFrom} stuck — terminating`)
+      const gone = await killStalePid(takeoverFrom, entry)
+      if (!gone) {
+        console.error(`takeover: old PID ${takeoverFrom} unkillable — standing down`)
+        process.exit(1)
+      }
+      console.log(`takeover: old PID ${takeoverFrom} terminated — taking over`)
+    } else {
+      console.log(`takeover: old PID ${takeoverFrom} gone — taking over`)
     }
-    console.log(`takeover: old PID ${takeoverFrom} gone — taking over`)
+  }
+  if (supervised()) {
+    // launchd/systemd owns us: any other identical generation is a stray
+    // (hand-started copy, survived handover). Cull before connecting so two
+    // generations never fight over the WhatsApp session (code 440 loop).
+    // Manual runs skip this — there WE are the likely stray.
+    for (const pid of siblingServePids(process.pid, entry)) {
+      console.log(`cull: stale wac generation PID ${pid} — terminating`)
+      await killStalePid(pid, entry)
+    }
   }
   // In supervised mode launchd/systemd owns process uniqueness. Avoid a
   // pidfile entirely: an exiting generation can otherwise race a replacement
