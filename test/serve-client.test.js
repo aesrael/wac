@@ -5,6 +5,7 @@ import {
   assistantResult,
   isInstantEmpty,
   hasTextPart,
+  pollContinues,
   partsToText,
   partsEmpty,
 } from "../dist/serve-client.js"
@@ -105,6 +106,17 @@ describe("hasTextPart", () => {
     assert.equal(hasTextPart([{ type: "text", text: "" }]), false)
     assert.equal(hasTextPart([{ type: "tool", text: "x" }]), false)
     assert.equal(hasTextPart([]), false)
+  })
+})
+
+describe("pollContinues", () => {
+  it("waits while the shared idle clock advances", () => {
+    assert.equal(pollContinues(1000, 1000 + 30_000), true)
+  })
+
+  it("exits on frozen idle or unknown", () => {
+    assert.equal(pollContinues(1000, 1000 + 61_000), false)
+    assert.equal(pollContinues(undefined, Date.now()), false)
   })
 })
 

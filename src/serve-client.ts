@@ -260,7 +260,7 @@ export class OpencodeClientFacade {
       const waitMs = Date.now() - waitedAt
       const durationMs = Date.now() - startedAt
       if (durationMs > 5000) console.log(`opencode prompt session=${sessionId} took ${Math.round(durationMs / 1000)}s`)
-      const result = await this.readLatestAssistant(sessionId, inbox.timeCreated, signal)
+      const result = await this.readLatestAssistant(sessionId, inbox.time.created, signal)
       // Cross-backend pickup: instant idle + no recorded reply means OUR
       // server never ran the turn — another backend sharing the store may
       // have (terminal opencode on the same data dir). Poll bounded before
@@ -268,7 +268,7 @@ export class OpencodeClientFacade {
       // wait() blocks for the whole run, so waitMs is large and the read
       // already holds the reply.
       if (waitMs < 5000 && (result.error ?? "").includes("no assistant reply recorded")) {
-        const polled = await this.pollForAssistantReply(sessionId, inbox.timeCreated, signal)
+        const polled = await this.pollForAssistantReply(sessionId, inbox.time.created, signal)
         if (polled) {
           console.log(`cross-backend poll session=${sessionId} delivered after ${Math.round((Date.now() - waitedAt) / 1000)}s`)
           return { ...polled, seedEnqueued, waitMs }
@@ -299,17 +299,18 @@ export class OpencodeClientFacade {
 
   /** Bounded poll for a reply produced by another backend sharing the store.
       Entered ONLY on instant-idle empties; a genuinely slow turn blocks in
-      wait() upstream and never reaches here. Returns the reply once a
-      time-matched text-bearing message exists, else undefined after the
-      budget. The caller's abort signal cancels mid-poll. */
+      wait() upstream and never reaches here. Each step checks for the reply
+      AND for session progress (shared idle clock): someone working means
+      keep waiting up to the cap, frozen idle means dead — exit at once.
+      The caller's abort signal cancels mid-poll. */
   private async pollForAssistantReply(
     sessionId: string,
     since: number,
     signal?: AbortSignal,
   ): Promise<Omit<PromptResult, "seedEnqueued" | "waitMs"> | undefined> {
-    const BUDGET_MS = 90_000
+    const CAP_MS = 600_000
     const STEP_MS = 5_000
-    const deadline = Date.now() + BUDGET_MS
+    const deadline = Date.now() + CAP_MS
     while (Date.now() < deadline) {
       await new Promise<void>((resolve, reject) => {
         const t = setTimeout(resolve, STEP_MS)
@@ -318,15 +319,23 @@ export class OpencodeClientFacade {
           reject(signal.reason ?? new Error("aborted"))
         }, { once: true })
       })
+      const opts = signal ? { signal } : undefined
       try {
-        const res = await this.client.message.list(
-          { sessionID: sessionId, limit: 20, order: "desc", type: "assistant" },
-          signal ? { signal } : undefined,
-        )
-        const { message, timeMatched } = selectAssistantMessage(res.data as SessionMessageAssistant[], since)
+        const [list, session] = await Promise.all([
+          this.client.message.list(
+            { sessionID: sessionId, limit: 20, order: "desc", type: "assistant" },
+            opts,
+          ),
+          this.client.session.get({ sessionID: sessionId }, opts).catch(() => undefined),
+        ])
+        const { message, timeMatched } = selectAssistantMessage(list.data as SessionMessageAssistant[], since)
         if (message && timeMatched && hasTextPart(message.content as TextPart[])) {
           return assistantResult(message, timeMatched)
         }
+        // No reply yet: only keep waiting while someone is working. The
+        // verdict is pure (pollContinues) so the policy is unit-tested.
+        const idle = (session as unknown as { time?: { idle?: number } })?.time?.idle
+        if (!pollContinues(idle, Date.now())) return undefined
       } catch {
         return undefined // read failed mid-poll: report the original empty result
       }
@@ -339,7 +348,7 @@ export class OpencodeClientFacade {
     // assistant messages, so wait for idle and read the latest one.
     const startedAt = Date.now()
     await withDeadline("command", FAST_OP_MS, async (signal) => {
-      await this.client.session.command({ sessionID: sessionId, command, text: args }, { signal })
+      await this.client.session.command({ sessionID: sessionId, name: command, text: args }, { signal })
       await this.client.session.wait({ sessionID: sessionId }, { signal })
     })
     const result = await this.readLatestAssistant(sessionId, startedAt)
@@ -397,7 +406,7 @@ export class OpencodeClientFacade {
         this.client.session.fork(
           {
             sessionID: sessionId,
-            boundary: trimmed ? { type: "before", messageID: trimmed } : { type: "through" },
+            ...(trimmed ? { before: trimmed } : {}),
           },
           { signal },
         ),
@@ -445,6 +454,14 @@ export function assistantResult(
         ? null
         : "no assistant reply recorded for this turn (showing latest)"
   return { message, text, isEmpty: partsEmpty(message.content as TextPart[]), error }
+}
+
+/** Poll policy: keep waiting only while the shared idle clock advances
+    (some backend is working the turn). Unknown idle fails safe to exit —
+    a wedged session must never hold the chat for the full cap. */
+export function pollContinues(idle: number | undefined, nowMs: number): boolean {
+  if (typeof idle !== "number") return false
+  return nowMs - idle < 60_000
 }
 
 /** Instant-empty check behind the empty-result error (exported for tests).

@@ -21,7 +21,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "@opencode/client": "^2.0.2",
+    "@opencode/client": "^2.0.10",
     "@whiskeysockets/baileys": "^7.0.0-rc14",
     "link-preview-js": "^3.2.0",
     "qrcode-terminal": "^0.12.0",
