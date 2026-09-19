@@ -139,6 +139,12 @@ export function partsEmpty(parts: TextPart[]): boolean {
   return parts.length === 0
 }
 
+/** True when the message carries a non-empty text part. Assistant rows that
+    are tool/reasoning-only are mid-turn work, not a deliverable reply. */
+export function hasTextPart(parts: TextPart[]): boolean {
+  return parts.some((p) => p.type === "text" && typeof p.text === "string" && (p.text as string).length > 0)
+}
+
 function toModelRef(model: string): { id: string; providerID: string } | undefined {
   const slash = model.indexOf("/")
   if (slash <= 0 || slash === model.length - 1) return undefined
@@ -255,6 +261,19 @@ export class OpencodeClientFacade {
       const durationMs = Date.now() - startedAt
       if (durationMs > 5000) console.log(`opencode prompt session=${sessionId} took ${Math.round(durationMs / 1000)}s`)
       const result = await this.readLatestAssistant(sessionId, inbox.timeCreated, signal)
+      // Cross-backend pickup: instant idle + no recorded reply means OUR
+      // server never ran the turn — another backend sharing the store may
+      // have (terminal opencode on the same data dir). Poll bounded before
+      // declaring failure. Healthy chats never enter this branch: their
+      // wait() blocks for the whole run, so waitMs is large and the read
+      // already holds the reply.
+      if (waitMs < 5000 && (result.error ?? "").includes("no assistant reply recorded")) {
+        const polled = await this.pollForAssistantReply(sessionId, inbox.timeCreated, signal)
+        if (polled) {
+          console.log(`cross-backend poll session=${sessionId} delivered after ${Math.round((Date.now() - waitedAt) / 1000)}s`)
+          return { ...polled, seedEnqueued, waitMs }
+        }
+      }
       return { ...result, seedEnqueued, waitMs }
     } catch (error) {
       throw toError(error)
@@ -276,6 +295,43 @@ export class OpencodeClientFacade {
       since,
     )
     return assistantResult(message, timeMatched)
+  }
+
+  /** Bounded poll for a reply produced by another backend sharing the store.
+      Entered ONLY on instant-idle empties; a genuinely slow turn blocks in
+      wait() upstream and never reaches here. Returns the reply once a
+      time-matched text-bearing message exists, else undefined after the
+      budget. The caller's abort signal cancels mid-poll. */
+  private async pollForAssistantReply(
+    sessionId: string,
+    since: number,
+    signal?: AbortSignal,
+  ): Promise<Omit<PromptResult, "seedEnqueued" | "waitMs"> | undefined> {
+    const BUDGET_MS = 90_000
+    const STEP_MS = 5_000
+    const deadline = Date.now() + BUDGET_MS
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve, reject) => {
+        const t = setTimeout(resolve, STEP_MS)
+        signal?.addEventListener("abort", () => {
+          clearTimeout(t)
+          reject(signal.reason ?? new Error("aborted"))
+        }, { once: true })
+      })
+      try {
+        const res = await this.client.message.list(
+          { sessionID: sessionId, limit: 20, order: "desc", type: "assistant" },
+          signal ? { signal } : undefined,
+        )
+        const { message, timeMatched } = selectAssistantMessage(res.data as SessionMessageAssistant[], since)
+        if (message && timeMatched && hasTextPart(message.content as TextPart[])) {
+          return assistantResult(message, timeMatched)
+        }
+      } catch {
+        return undefined // read failed mid-poll: report the original empty result
+      }
+    }
+    return undefined
   }
 
   async command(sessionId: string, command: string, args: string): Promise<string> {
@@ -357,15 +413,20 @@ export class OpencodeClientFacade {
 }
 
 /** Pure message selection behind readLatestAssistant (exported for tests).
-    Prefers the turn matching `since`, falls back to latest so clock skew
-    never surfaces as empty. Single read, no retry anywhere in this path. */
+    Prefers the newest turn matching `since` that carries a text part — the
+    newest row is often a tool/reasoning-only assistant message mid-turn, and
+    surfacing it yields "(no text reply)". Falls back to the latest text-bearing
+    row regardless of window (clock skew), then to the newest row at all.
+    Single read, no retry anywhere in this path. */
 export function selectAssistantMessage(
   data: SessionMessageAssistant[],
   since: number,
 ): { message: SessionMessageAssistant | undefined; timeMatched: boolean } {
   const WINDOW_MS = 60_000
-  const matched = data.find((m) => m.time.created >= since - WINDOW_MS) as SessionMessageAssistant | undefined
+  const matched = data.find((m) => m.time.created >= since - WINDOW_MS && hasTextPart(m.content as TextPart[])) as SessionMessageAssistant | undefined
   if (matched) return { message: matched, timeMatched: true }
+  const fallbackText = data.find((m) => hasTextPart(m.content as TextPart[])) as SessionMessageAssistant | undefined
+  if (fallbackText) return { message: fallbackText, timeMatched: false }
   return { message: data[0] as SessionMessageAssistant | undefined, timeMatched: false }
 }
 
@@ -386,22 +447,12 @@ export function assistantResult(
   return { message, text, isEmpty: partsEmpty(message.content as TextPart[]), error }
 }
 
-/** Stall triage behind the instant-empty error (exported for tests).
-    An instant empty alone only means "no reply yet" — common when a slow
-    turn is still running, possibly picked up by a second backend (terminal)
-    sharing the session. Only call it stalled with server-side evidence:
-    the session idle timestamp is minutes old (nothing runs) or the last
-    outcome failed. Returns 'wedged', 'slow', or 'unknown' (no info). */
-export function stallVerdict(
-  session: { time?: { idle?: number }; outcome?: string | null } | undefined,
-  nowMs: number,
-): "wedged" | "slow" | "unknown" {
-  const idle = session?.time?.idle
-  if (typeof idle !== "number") return "unknown"
-  const ageMs = nowMs - idle
-  if (session?.outcome === "failed" && ageMs > 60_000) return "wedged"
-  if (ageMs > 180_000) return "wedged"
-  return "slow"
+/** Instant-empty check behind the empty-result error (exported for tests).
+    waitMs near-zero with no new message means the reply wasn't there when
+    wac looked — slow turn, cross-backend pickup, or a truly stalled
+    session. One static message covers all three; wac doesn't diagnose. */
+export function isInstantEmpty(waitMs: number, error: string | null | undefined): boolean {
+  return waitMs < 5000 && (error ?? "").includes("no assistant reply recorded")
 }
 
 function modelRefOrThrow(model: string): { model: { id: string; providerID: string } } {  const ref = toModelRef(model)

@@ -3,7 +3,8 @@ import assert from "node:assert/strict"
 import {
   selectAssistantMessage,
   assistantResult,
-  stallVerdict,
+  isInstantEmpty,
+  hasTextPart,
   partsToText,
   partsEmpty,
 } from "../dist/serve-client.js"
@@ -18,19 +19,36 @@ const msg = (over = {}) => ({
 })
 
 describe("selectAssistantMessage", () => {
+  const textMsg = (over = {}) => msg({ ...over, content: [{ type: "text", text: "hello" }] })
+  const toolMsg = (over = {}) => msg({ ...over, content: [{ type: "tool" }] })
+
   it("prefers the turn matching since within the 60s window", () => {
-    const fresh = msg({ id: "fresh", time: { created: NOW } })
-    const old = msg({ id: "old", time: { created: NOW - 3600_000 } })
+    const fresh = textMsg({ id: "fresh", time: { created: NOW } })
+    const old = textMsg({ id: "old", time: { created: NOW - 3600_000 } })
     const { message, timeMatched } = selectAssistantMessage([fresh, old], NOW)
     assert.equal(message.id, "fresh")
     assert.equal(timeMatched, true)
   })
 
-  it("falls back to latest instead of empty on clock skew", () => {
-    const skewed = msg({ id: "skewed", time: { created: NOW - 3600_000 } })
+  it("skips mid-turn tool-only rows and picks the text-bearing one", () => {
+    const tool = toolMsg({ id: "tool", time: { created: NOW } })
+    const text = textMsg({ id: "text", time: { created: NOW - 2000 } })
+    const { message, timeMatched } = selectAssistantMessage([tool, text], NOW)
+    assert.equal(message.id, "text")
+    assert.equal(timeMatched, true)
+  })
+
+  it("falls back to latest text-bearing instead of empty on clock skew", () => {
+    const skewed = textMsg({ id: "skewed", time: { created: NOW - 3600_000 } })
     const { message, timeMatched } = selectAssistantMessage([skewed], NOW)
     assert.equal(message.id, "skewed")
     assert.equal(timeMatched, false)
+  })
+
+  it("returns the newest row when nothing has text (tool-only turn)", () => {
+    const tool = toolMsg({ id: "toolonly", time: { created: NOW } })
+    const { message } = selectAssistantMessage([tool], NOW)
+    assert.equal(message.id, "toolonly")
   })
 
   it("returns undefined when there are no assistant messages", () => {
@@ -66,25 +84,27 @@ describe("assistantResult", () => {
   })
 })
 
-describe("stallVerdict", () => {
-  it("wedged when failed outcome and idle over a minute", () => {
-    assert.equal(stallVerdict({ time: { idle: 1000 }, outcome: "failed" }, 1000 + 61_000), "wedged")
+describe("isInstantEmpty", () => {
+  it("true for instant empty with the known error", () => {
+    assert.equal(isInstantEmpty(120, "no assistant reply recorded (no assistant messages)"), true)
   })
 
-  it("wedged when idle over three minutes regardless of outcome", () => {
-    assert.equal(stallVerdict({ time: { idle: 1000 }, outcome: "succeeded" }, 1000 + 181_000), "wedged")
+  it("false for slow failures", () => {
+    assert.equal(isInstantEmpty(90000, "no assistant reply recorded (no assistant messages)"), false)
   })
 
-  it("slow when idle is fresh", () => {
-    assert.equal(stallVerdict({ time: { idle: 1000 }, outcome: "succeeded" }, 1000 + 30_000), "slow")
+  it("false for other errors even when instant", () => {
+    assert.equal(isInstantEmpty(100, "model error (boom)"), false)
+    assert.equal(isInstantEmpty(100, null), false)
   })
+})
 
-  it("slow when failed but idle just now (run may still be settling)", () => {
-    assert.equal(stallVerdict({ time: { idle: 1000 }, outcome: "failed" }, 1000 + 10_000), "slow")
-  })
-
-  it("unknown with no session info", () => {
-    assert.equal(stallVerdict(undefined, Date.now()), "unknown")
+describe("hasTextPart", () => {
+  it("true only for non-empty text parts", () => {
+    assert.equal(hasTextPart([{ type: "text", text: "hi" }]), true)
+    assert.equal(hasTextPart([{ type: "text", text: "" }]), false)
+    assert.equal(hasTextPart([{ type: "tool", text: "x" }]), false)
+    assert.equal(hasTextPart([]), false)
   })
 })
 

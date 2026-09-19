@@ -10,7 +10,7 @@ import { OpencodeClientFacade, reachable } from "./serve-client.js"
 import { SessionRouter } from "./sessions.js"
 import { Store } from "./store.js"
 import { chunk, softFormat, withSuffix } from "./chunker.js"
-import { partsEmpty, stallVerdict } from "./serve-client.js"
+import { partsEmpty, isInstantEmpty } from "./serve-client.js"
 import { handleCommand, isLocalCommand, handlePassthrough } from "./commands.js"
 import { supervised, RESTART_EXIT_CODE, attemptRestart, acquireLock, siblingServePids, killStalePid, waitForOldDeath } from "./supervise.js"
 
@@ -448,7 +448,10 @@ async function processMessage(
     // system.prompt on every retry).
     if (result.seedEnqueued) router.markSystemSeeded(chatJid, record.sessionId)
     if (result.isEmpty || result.error) {
-      const errText = await describeEmptyResult(opencode, record.sessionId, result.waitMs, result.error)
+      const errText =
+        isInstantEmpty(result.waitMs, result.error)
+          ? "no reply recorded yet — the turn may still be running (slow session, or picked up by your terminal on this chat). Wait a minute and retry. If it keeps failing instantly for minutes, the session is stalled: /fork keeps history, /new starts clean."
+          : (result.error ?? "model returned nothing readable — wrong or unpaid model?")
       await sendReplyOnce(whatsapp, chatJid, result.message?.id, `(error) ${errText}`, wacLabel(record.sessionId, record.model ?? config.defaultModel))
       return
     }
@@ -483,35 +486,6 @@ async function processMessage(
     await sendChunked(whatsapp, chatJid, `(error) ${msg}`, label)
   } finally {
     await whatsapp.stopTyping(chatJid)
-  }
-}
-
-/** Triage for an empty prompt result (exported shape kept local: tested via
-    stallVerdict). Slow-but-instant empties (turn still running, possibly on
-    a second backend sharing the session) must never be labeled stalled —
-    that label sends users to /fork over a merely slow turn. The session
-    lookup is best-effort and never worsens the reply on failure. */
-async function describeEmptyResult(
-  opencode: OpencodeClientFacade,
-  sessionId: string,
-  waitMs: number,
-  error: string | null | undefined,
-): Promise<string> {
-  const fallback = error ?? "model returned nothing readable — wrong or unpaid model?"
-  const instantEmpty = waitMs < 5000 && (error ?? "").includes("no assistant reply recorded")
-  if (!instantEmpty) return fallback
-  try {
-    const session = await opencode.getSession(sessionId)
-    const verdict = stallVerdict(
-      { time: { idle: (session as { time?: { idle?: number } }).time?.idle }, outcome: session.outcome ?? null },
-      Date.now(),
-    )
-    if (verdict === "wedged") {
-      return "session looks stalled — idle for minutes with nothing new (inbox not draining server-side). /stop won't help this; /fork keeps history with a fresh processor, /new starts clean."
-    }
-    return "no reply recorded yet — the turn may still be running (possibly picked up by your terminal session on this chat). Wait a minute and retry; don't /new yet."
-  } catch {
-    return fallback
   }
 }
 
