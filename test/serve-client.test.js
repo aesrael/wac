@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import {
   selectAssistantMessage,
   assistantResult,
-  isStallResult,
+  stallVerdict,
   partsToText,
   partsEmpty,
 } from "../dist/serve-client.js"
@@ -66,18 +66,25 @@ describe("assistantResult", () => {
   })
 })
 
-describe("isStallResult", () => {
-  it("true for instant empty with the known error", () => {
-    assert.equal(isStallResult(120, "no assistant reply recorded (no assistant messages)"), true)
+describe("stallVerdict", () => {
+  it("wedged when failed outcome and idle over a minute", () => {
+    assert.equal(stallVerdict({ time: { idle: 1000 }, outcome: "failed" }, 1000 + 61_000), "wedged")
   })
 
-  it("false for slow failures", () => {
-    assert.equal(isStallResult(90000, "no assistant reply recorded (no assistant messages)"), false)
+  it("wedged when idle over three minutes regardless of outcome", () => {
+    assert.equal(stallVerdict({ time: { idle: 1000 }, outcome: "succeeded" }, 1000 + 181_000), "wedged")
   })
 
-  it("false for other errors even when instant", () => {
-    assert.equal(isStallResult(100, "model error (boom)"), false)
-    assert.equal(isStallResult(100, null), false)
+  it("slow when idle is fresh", () => {
+    assert.equal(stallVerdict({ time: { idle: 1000 }, outcome: "succeeded" }, 1000 + 30_000), "slow")
+  })
+
+  it("slow when failed but idle just now (run may still be settling)", () => {
+    assert.equal(stallVerdict({ time: { idle: 1000 }, outcome: "failed" }, 1000 + 10_000), "slow")
+  })
+
+  it("unknown with no session info", () => {
+    assert.equal(stallVerdict(undefined, Date.now()), "unknown")
   })
 })
 

@@ -386,11 +386,22 @@ export function assistantResult(
   return { message, text, isEmpty: partsEmpty(message.content as TextPart[]), error }
 }
 
-/** Stall predicate behind the instant-empty error (exported for tests).
-    waitMs near-zero with no new message means the session never ran the
-    turn — stalled, not slow. Slow turns fail after minutes, never here. */
-export function isStallResult(waitMs: number, error: string | null | undefined): boolean {
-  return waitMs < 5000 && (error ?? "").includes("no assistant reply recorded")
+/** Stall triage behind the instant-empty error (exported for tests).
+    An instant empty alone only means "no reply yet" — common when a slow
+    turn is still running, possibly picked up by a second backend (terminal)
+    sharing the session. Only call it stalled with server-side evidence:
+    the session idle timestamp is minutes old (nothing runs) or the last
+    outcome failed. Returns 'wedged', 'slow', or 'unknown' (no info). */
+export function stallVerdict(
+  session: { time?: { idle?: number }; outcome?: string | null } | undefined,
+  nowMs: number,
+): "wedged" | "slow" | "unknown" {
+  const idle = session?.time?.idle
+  if (typeof idle !== "number") return "unknown"
+  const ageMs = nowMs - idle
+  if (session?.outcome === "failed" && ageMs > 60_000) return "wedged"
+  if (ageMs > 180_000) return "wedged"
+  return "slow"
 }
 
 function modelRefOrThrow(model: string): { model: { id: string; providerID: string } } {  const ref = toModelRef(model)
