@@ -7,7 +7,7 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys"
 import { useMultiFileAuthState } from "@whiskeysockets/baileys"
 import QRCode from "qrcode-terminal"
-import { readFile } from "node:fs/promises"
+import { readFile, stat } from "node:fs/promises"
 import { basename } from "node:path"
 import { WacConfig } from "./config.js"
 
@@ -41,6 +41,22 @@ const SEND_TIMEOUT_MS = 20_000
 const PRESENCE_TIMEOUT_MS = 10_000
 const MEDIA_TIMEOUT_MS = 60_000
 
+/** Outbound guard: same 25MB cap as inbound. stat before read so an
+    oversized [image:]/[file:] fails fast with a clear message instead of
+    eating memory and dying as a generic 20s send timeout. */
+async function checkOutboundSize(kind: string, filePath: string): Promise<void> {
+  let bytes = 0
+  try {
+    bytes = (await stat(filePath)).size
+  } catch {
+    throw new Error(`${kind} not found: ${filePath}`)
+  }
+  if (bytes > MAX_MEDIA_BYTES) {
+    throw new Error(
+      `${kind} too large (${(bytes / 1048576).toFixed(1)}MB > ${MAX_MEDIA_BYTES / 1048576}MB max): ${filePath}`,
+    )
+  }
+}
 /** Race any socket/media await against a deadline so nothing waits forever. */
 async function withTimeout<T>(label: string, ms: number, fn: () => Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -488,6 +504,7 @@ export class WhatsAppClient {
 
   async sendImage(chatJid: string, filePath: string, caption?: string, opts?: { ephemeralExpiration?: number }): Promise<void> {
     if (!this.socket) throw new Error("WhatsApp socket not connected")
+    await checkOutboundSize("image", filePath)
     const image = await readFile(filePath)
     const content: AnyMessageContent = caption?.trim() ? { image, caption: caption.trim() } : { image }
     const ephemeralExpiration = opts?.ephemeralExpiration ?? this.chatEphemeral.get(chatJid)
@@ -505,6 +522,7 @@ export class WhatsAppClient {
 
   async sendDocument(chatJid: string, filePath: string, caption?: string, opts?: { ephemeralExpiration?: number }): Promise<void> {
     if (!this.socket) throw new Error("WhatsApp socket not connected")
+    await checkOutboundSize("file", filePath)
     const document = await readFile(filePath)
     const fileName = basename(filePath).slice(0, 255) || `file-${Date.now()}`
     const ext = fileName.split(".").pop()?.toLowerCase() ?? ""

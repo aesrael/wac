@@ -542,12 +542,13 @@ type OutboxMessage = {
   to?: string
   text?: string
   image?: string
+  file?: string
   created?: number
 }
 
 /**
  * Outbox queue: external tools (e.g. terminus schedule) drop
- * `{ to?, text, created? }` JSON files into `<dataDir>/outbox/`.
+ * `{ to?, text, image?, file?, created? }` JSON files into `<dataDir>/outbox/`.
  * The daemon sends them through its own socket (no second Baileys
  * connection) and deletes on success. Stale files get an age prefix.
  */
@@ -580,9 +581,9 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig, router: Sessio
           ageMin > 5
             ? `(queued ${new Date(msg.created as number).toLocaleString()})\n\n${msg.text}`
             : msg.text
-        const payload = typeof msg.image === "string" && msg.image.trim()
-          ? `${msg.text.trim()}\n[image:${msg.image.trim()}]`
-          : body
+        const imageTag = typeof msg.image === "string" && msg.image.trim() ? `\n[image:${msg.image.trim()}]` : ""
+        const fileTag = typeof msg.file === "string" && msg.file.trim() ? `\n[file:${msg.file.trim()}]` : ""
+        const payload = imageTag || fileTag ? `${msg.text.trim()}${imageTag}${fileTag}` : body
         const to = msg.to ? toJid(msg.to) : toJid(config.allowlist[0])
         if (!allowed.has(to) || !(to.endsWith("@s.whatsapp.net") || to.endsWith("@lid"))) {
           throw new Error("outbox recipient is not allowlisted")

@@ -181,6 +181,7 @@ export function helpText(): string {
     "  /model default <provider/model>  set global default (new chats use it)",
     "  /models [query] [n] search/list available models (default 20)",
     "  /status     connection status",
+    "Media: embed [image:/abs/path caption] or [file:/abs/path caption] in a reply to send it.",
     "Anything else is sent to opencode as a prompt.",
   ].join("\n")
 }
