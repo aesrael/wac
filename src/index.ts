@@ -10,7 +10,7 @@ import { OpencodeClientFacade, reachable } from "./serve-client.js"
 import { SessionRouter } from "./sessions.js"
 import { Store } from "./store.js"
 import { chunk, softFormat, withSuffix } from "./chunker.js"
-import { partsEmpty } from "./serve-client.js"
+import { partsEmpty, isStallResult } from "./serve-client.js"
 import { handleCommand, isLocalCommand, handlePassthrough } from "./commands.js"
 import { supervised, RESTART_EXIT_CODE, attemptRestart, acquireLock, siblingServePids, killStalePid, waitForOldDeath } from "./supervise.js"
 
@@ -442,8 +442,16 @@ async function processMessage(
     }
 
     const result = await promptWithRetry(opencode, router, chatJid, record, promptText, config, media)
+    // Seed bookkeeping keys off inbox acceptance, not reply success: the seed
+    // text is in history once the prompt POST lands, so a failed turn must
+    // not re-send it next time (that loop is how wedged sessions got
+    // system.prompt on every retry).
+    if (result.seedEnqueued) router.markSystemSeeded(chatJid, record.sessionId)
     if (result.isEmpty || result.error) {
-      await sendReplyOnce(whatsapp, chatJid, result.message?.id, `(error) ${result.error ?? "model returned nothing readable — wrong or unpaid model?"}`, wacLabel(record.sessionId, record.model ?? config.defaultModel))
+      const errText = isStallResult(result.waitMs, result.error)
+        ? "session looks stalled — reply came back instantly with nothing new (inbox not draining server-side). /stop won't help this; /fork keeps history with a fresh processor, /new starts clean."
+        : (result.error ?? "model returned nothing readable — wrong or unpaid model?")
+      await sendReplyOnce(whatsapp, chatJid, result.message?.id, `(error) ${errText}`, wacLabel(record.sessionId, record.model ?? config.defaultModel))
       return
     }
     await sendReplyOnce(whatsapp, chatJid, result.message?.id, result.text || "(no text reply)", wacLabel(record.sessionId, record.model ?? config.defaultModel))
@@ -510,8 +518,8 @@ async function promptWithRetry(
       () => ctl.abort(),
       config.promptTimeoutMs,
     )
-    // Only mark on success: a failed turn never delivered the seed.
-    router.markSystemSeeded(chatJid, record.sessionId)
+    // Seed marking lives with the caller (keys off inbox acceptance, not
+    // reply success). Nothing to do here on success.
     return result
   } finally {
     untrackController(chatJid, ctl)

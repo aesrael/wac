@@ -114,6 +114,13 @@ export type PromptResult = {
   text: string
   isEmpty: boolean
   error?: string | null
+  /** True when the prompt text (including any system seed) was accepted into
+      the session inbox. Seed bookkeeping keys off this, not reply success, so
+      a failed turn never re-sends the system prompt in a loop. */
+  seedEnqueued: boolean
+  /** Milliseconds from prompt accept to wait() returning idle. Near-zero with
+      no new message means the session is stalled, not slow. */
+  waitMs: number
 }
 
 type TextPart = { type: string; text?: string }
@@ -234,14 +241,21 @@ export class OpencodeClientFacade {
         name: m.filename ?? `file-${Date.now()}`,
       }))
       const opts = signal ? { signal } : undefined
+      // Past the prompt POST: the text (including any system seed) is in the
+      // inbox, so seed bookkeeping counts it as delivered even if the run
+      // later fails. Anything thrown above skips this line: nothing enqueued.
+      const seedEnqueued = !!system
       const inbox = await this.client.session.prompt(
         { sessionID: sessionId, text: body || text, ...(files.length ? { files } : {}) },
         opts,
       )
+      const waitedAt = Date.now()
       await this.client.session.wait({ sessionID: sessionId }, opts)
+      const waitMs = Date.now() - waitedAt
       const durationMs = Date.now() - startedAt
       if (durationMs > 5000) console.log(`opencode prompt session=${sessionId} took ${Math.round(durationMs / 1000)}s`)
-      return await this.readLatestAssistant(sessionId, inbox.timeCreated, signal)
+      const result = await this.readLatestAssistant(sessionId, inbox.timeCreated, signal)
+      return { ...result, seedEnqueued, waitMs }
     } catch (error) {
       throw toError(error)
     }
@@ -251,22 +265,17 @@ export class OpencodeClientFacade {
     sessionId: string,
     since: number,
     signal?: AbortSignal,
-  ): Promise<PromptResult> {
+  ): Promise<Omit<PromptResult, "seedEnqueued" | "waitMs">> {
     const opts = signal ? { signal } : undefined
     const res = await this.client.message.list(
       { sessionID: sessionId, limit: 20, order: "desc", type: "assistant" },
       opts,
     )
-    const message = res.data.find((m) => m.time.created >= since - 5000) as SessionMessageAssistant | undefined
-    if (!message) {
-      return { message: undefined, text: "", isEmpty: true, error: "no assistant reply recorded" }
-    }
-    const text = partsToText(message.content as TextPart[])
-    const error =
-      message.finish === "error"
-        ? (message as { error?: { message?: string } }).error?.message ?? `model error (${message.rawFinish ?? "unknown"})`
-        : null
-    return { message, text, isEmpty: partsEmpty(message.content as TextPart[]), error }
+    const { message, timeMatched } = selectAssistantMessage(
+      res.data as SessionMessageAssistant[],
+      since,
+    )
+    return assistantResult(message, timeMatched)
   }
 
   async command(sessionId: string, command: string, args: string): Promise<string> {
@@ -281,13 +290,23 @@ export class OpencodeClientFacade {
     return result.text
   }
 
-  async summarize(sessionId: string, model?: string): Promise<boolean> {
+  /** Compact the session. Returns 'done' when the server went idle after the
+      compact RPC, 'queued' when compaction was accepted but still running past
+      the wait budget — callers must not report success as fact in that case. */
+  async summarize(sessionId: string, model?: string): Promise<"done" | "queued"> {
     // v2 compacts with the session's current model: pin the explicit one first.
     if (model) await this.switchModel(sessionId, model)
     await withDeadline("summarize", FAST_OP_MS, async (signal) => {
       await this.client.session.compact({ sessionID: sessionId }, { signal })
     })
-    return true
+    try {
+      await withDeadline("compact-wait", 60_000, async (signal) => {
+        await this.client.session.wait({ sessionID: sessionId }, { signal })
+      })
+      return "done"
+    } catch {
+      return "queued"
+    }
   }
 
   async listProviders(): Promise<Array<{ id: string; models: Record<string, unknown> }>> {
@@ -337,8 +356,44 @@ export class OpencodeClientFacade {
   }
 }
 
-function modelRefOrThrow(model: string): { model: { id: string; providerID: string } } {
-  const ref = toModelRef(model)
+/** Pure message selection behind readLatestAssistant (exported for tests).
+    Prefers the turn matching `since`, falls back to latest so clock skew
+    never surfaces as empty. Single read, no retry anywhere in this path. */
+export function selectAssistantMessage(
+  data: SessionMessageAssistant[],
+  since: number,
+): { message: SessionMessageAssistant | undefined; timeMatched: boolean } {
+  const WINDOW_MS = 60_000
+  const matched = data.find((m) => m.time.created >= since - WINDOW_MS) as SessionMessageAssistant | undefined
+  if (matched) return { message: matched, timeMatched: true }
+  return { message: data[0] as SessionMessageAssistant | undefined, timeMatched: false }
+}
+
+export function assistantResult(
+  message: SessionMessageAssistant | undefined,
+  timeMatched: boolean,
+): Omit<PromptResult, "seedEnqueued" | "waitMs"> {
+  if (!message) {
+    return { message: undefined, text: "", isEmpty: true, error: "no assistant reply recorded (no assistant messages)" }
+  }
+  const text = partsToText(message.content as TextPart[])
+  const error =
+    message.finish === "error"
+      ? (message as { error?: { message?: string } }).error?.message ?? `model error (${message.rawFinish ?? "unknown"})`
+      : timeMatched
+        ? null
+        : "no assistant reply recorded for this turn (showing latest)"
+  return { message, text, isEmpty: partsEmpty(message.content as TextPart[]), error }
+}
+
+/** Stall predicate behind the instant-empty error (exported for tests).
+    waitMs near-zero with no new message means the session never ran the
+    turn — stalled, not slow. Slow turns fail after minutes, never here. */
+export function isStallResult(waitMs: number, error: string | null | undefined): boolean {
+  return waitMs < 5000 && (error ?? "").includes("no assistant reply recorded")
+}
+
+function modelRefOrThrow(model: string): { model: { id: string; providerID: string } } {  const ref = toModelRef(model)
   if (!ref) throw new Error(`bad model reference ${model}; want provider/model`)
   return { model: ref }
 }

@@ -336,10 +336,16 @@ export async function handleCommand(
         sid = target
       }
       const effective = router.chatSession(chatJid)?.model ?? config.defaultModel
-      await client.summarize(sid, effective)
+      const status = await client.summarize(sid, effective)
       // Compacting may dilute the folded-in system prompt: re-seed once next turn.
       router.clearSystemSeeded(chatJid)
-      return { handled: true, text: `Compacting ${sid.slice(0, 8)}…` }
+      return {
+        handled: true,
+        text:
+          status === "done"
+            ? `Compacting ${sid.slice(0, 8)}…`
+            : `Compaction of ${sid.slice(0, 8)} is still running past 60s — it continues server-side. If your next message fails instantly, the session is stalled: /fork or /new.`,
+      }
     }
 
     case "/current": {

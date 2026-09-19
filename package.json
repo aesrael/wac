@@ -13,6 +13,7 @@
     "dev": "tsx wac serve",
     "serve": "node wac serve",
     "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.js",
     "launchd": "node scripts/install-launchd.mjs",
     "postinstall": "node tools/patch-libsignal.mjs"
   },
