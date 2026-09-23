@@ -6,7 +6,7 @@ import { join, normalize, resolve, dirname, basename } from "node:path"
 import { authPath, configPath, defaultConfig, ensureDataDir, loadConfig, writeConfig } from "./config.js"
 import type { WacConfig } from "./config.js"
 import { WhatsAppClient, hasCredentials, type MessageEvent } from "./baileys.js"
-import { OpencodeClientFacade, reachable } from "./serve-client.js"
+import { OpencodeClientFacade, reachable, serverVersion } from "./serve-client.js"
 import { SessionRouter } from "./sessions.js"
 import { Store } from "./store.js"
 import { chunk, softFormat, withSuffix } from "./chunker.js"
@@ -620,9 +620,51 @@ function startOutbox(whatsapp: WhatsAppClient, config: WacConfig, router: Sessio
   void poll() // deliver immediately on boot, don't wait a full interval
 }
 
+function wacVersion(): string {
+  const repo = dirname(dirname(resolve(process.argv[1])))
+  try {
+    const out = execFileSync("git", ["describe", "--tags", "--always"], { cwd: repo, timeout: 3000 }).toString().trim()
+    if (out) return out
+  } catch { /* fall through */ }
+  try {
+    return JSON.parse(readFileSync(join(repo, "package.json"), "utf8")).version || "unknown"
+  } catch { /* fall through */ }
+  return "unknown"
+}
+
+function sdkVersion(): string {
+  try {
+    const pkg = resolve(dirname(resolve(process.argv[1])), "../node_modules/@opencode/client/package.json")
+    return JSON.parse(readFileSync(pkg, "utf8")).version || "unknown"
+  } catch { /* fall through */ }
+  return "unknown"
+}
+
+function semverLt(a: string, b: string): boolean {
+  const pa = a.split(".").map((s) => Number.parseInt(s, 10) || 0)
+  const pb = b.split(".").map((s) => Number.parseInt(s, 10) || 0)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    if ((pa[i] ?? 0) < (pb[i] ?? 0)) return true
+    if ((pa[i] ?? 0) > (pb[i] ?? 0)) return false
+  }
+  return false
+}
+
 async function sendWelcome(whatsapp: WhatsAppClient, config: WacConfig): Promise<boolean> {
+  const auth = {
+    baseUrl: config.opencodeBaseUrl,
+    username: config.opencodeUsername,
+    password: config.opencodePassword,
+    directory: config.opencodeDirectory,
+  }
+  const [server, sdk] = await Promise.all([serverVersion(auth), Promise.resolve(sdkVersion())])
   const message = [
     `☘️ wac is online — send /help for commands, or just message me.`,
+    ``,
+    `_wac ${wacVersion()} · opencode ${server ?? "?"} (SDK ${sdk})_`,
+    ...(server && semverLt(server, sdk)
+      ? [``, `> ⚠ upgrade opencode to ${sdk} (\`opencode upgrade\`) for best experience`]
+      : []),
   ].join("\n")
   let sent = 0
   for (const number of config.allowlist) {

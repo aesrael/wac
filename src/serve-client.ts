@@ -100,6 +100,25 @@ export function makeClient(auth: OpenCodeAuth): OpenCodeClient {
   })
 }
 
+/** Server version from GET /app, authed the same way the SDK is. The v2
+    SDK exposes no clean route for it, so fetch once and parse lightly.
+    Best-effort: undefined on unreachable/blocked, never a thrown error. */
+export async function serverVersion(auth: OpenCodeAuth): Promise<string | undefined> {
+  try {
+    const base = auth.baseUrl.endsWith("/") ? auth.baseUrl : `${auth.baseUrl}/`
+    const res = await fetch(new URL("app", base), {
+      headers: authHeader(auth),
+      signal: AbortSignal.timeout(5_000),
+    })
+    const body: unknown = await res.json()
+    const version =
+      body && typeof body === "object" ? (body as { version?: unknown }).version : undefined
+    return typeof version === "string" && version ? version : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export async function reachable(auth: OpenCodeAuth): Promise<boolean> {
   try {
     await makeClient(auth).session.list({ directory: auth.directory })

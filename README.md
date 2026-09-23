@@ -35,6 +35,11 @@ Chat with your [opencode](https://opencode.ai) agent from WhatsApp.
 
 **Prereqs:** Node 22+, `opencode` installed, WhatsApp account.
 
+> **opencode version:** match the server version to the `@opencode/client`
+> pin in `package.json`. The SDK breaks between releases; version mismatches
+> surface as API errors, not a clean warning. Check with `opencode --version`,
+> upgrade with `opencode upgrade`, then bump the pin and restart the daemon.
+
 ```sh
 npm install && npm run build
 # edit ~/.config/wac/config.json (created from config.example.json)
