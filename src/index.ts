@@ -448,9 +448,13 @@ async function processMessage(
     // system.prompt on every retry).
     if (result.seedEnqueued) router.markSystemSeeded(chatJid, record.sessionId)
     if (result.isEmpty || result.error) {
+      // Always surface the backend's real reason: fast-failing turns used to
+      // arrive with the generic text only, hiding rate limits and auth errors.
+      const real = (result.error ?? "").replace(/^no assistant reply recorded[.\s:-]*/i, "").trim()
+      const backendSaid = real ? ` Backend said: ${real.slice(0, 300)}` : ""
       const errText =
         isInstantEmpty(result.waitMs, result.error)
-          ? "no reply recorded yet — the turn may still be running (slow session, or picked up by your terminal on this chat). Wait a minute and retry. If it keeps failing instantly for minutes, the session is stalled: /fork keeps history, /new starts clean."
+          ? `no reply recorded yet — the turn may still be running (slow session, or picked up by your terminal on this chat). Wait a minute and retry. If it keeps failing instantly for minutes, the session is stalled: /fork keeps history, /new starts clean.${backendSaid}`
           : (result.error ?? "model returned nothing readable — wrong or unpaid model?")
       await sendReplyOnce(whatsapp, chatJid, result.message?.id, `(error) ${errText}`, wacLabel(record.sessionId, record.model ?? config.defaultModel))
       return
